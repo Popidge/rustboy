@@ -125,6 +125,7 @@ impl Cpu {
             0x43 => Ok(self.ld_r_r(Register8::B, Register8::E)),
             0x44 => Ok(self.ld_r_r(Register8::B, Register8::H)),
             0x45 => Ok(self.ld_r_r(Register8::B, Register8::L)),
+            0x46 => Ok(self.ld_r_addr_hl(Register8::B, bus)),
             0x47 => Ok(self.ld_r_r(Register8::B, Register8::A)),
             0x48 => Ok(self.ld_r_r(Register8::C, Register8::B)),
             0x49 => Ok(self.ld_r_r(Register8::C, Register8::C)),
@@ -132,6 +133,7 @@ impl Cpu {
             0x4B => Ok(self.ld_r_r(Register8::C, Register8::E)),
             0x4C => Ok(self.ld_r_r(Register8::C, Register8::H)),
             0x4D => Ok(self.ld_r_r(Register8::C, Register8::L)),
+            0x4E => Ok(self.ld_r_addr_hl(Register8::C, bus)),
             0x4F => Ok(self.ld_r_r(Register8::C, Register8::A)),
             0x50 => Ok(self.ld_r_r(Register8::D, Register8::B)),
             0x51 => Ok(self.ld_r_r(Register8::D, Register8::C)),
@@ -139,6 +141,7 @@ impl Cpu {
             0x53 => Ok(self.ld_r_r(Register8::D, Register8::E)),
             0x54 => Ok(self.ld_r_r(Register8::D, Register8::H)),
             0x55 => Ok(self.ld_r_r(Register8::D, Register8::L)),
+            0x56 => Ok(self.ld_r_addr_hl(Register8::D, bus)),
             0x57 => Ok(self.ld_r_r(Register8::D, Register8::A)),
             0x58 => Ok(self.ld_r_r(Register8::E, Register8::B)),
             0x59 => Ok(self.ld_r_r(Register8::E, Register8::C)),
@@ -146,6 +149,7 @@ impl Cpu {
             0x5B => Ok(self.ld_r_r(Register8::E, Register8::E)),
             0x5C => Ok(self.ld_r_r(Register8::E, Register8::H)),
             0x5D => Ok(self.ld_r_r(Register8::E, Register8::L)),
+            0x5E => Ok(self.ld_r_addr_hl(Register8::E, bus)),
             0x5F => Ok(self.ld_r_r(Register8::E, Register8::A)),
             0x60 => Ok(self.ld_r_r(Register8::H, Register8::B)),
             0x61 => Ok(self.ld_r_r(Register8::H, Register8::C)),
@@ -153,6 +157,7 @@ impl Cpu {
             0x63 => Ok(self.ld_r_r(Register8::H, Register8::E)),
             0x64 => Ok(self.ld_r_r(Register8::H, Register8::H)),
             0x65 => Ok(self.ld_r_r(Register8::H, Register8::L)),
+            0x66 => Ok(self.ld_r_addr_hl(Register8::H, bus)),
             0x67 => Ok(self.ld_r_r(Register8::H, Register8::A)),
             0x68 => Ok(self.ld_r_r(Register8::L, Register8::B)),
             0x69 => Ok(self.ld_r_r(Register8::L, Register8::C)),
@@ -160,7 +165,14 @@ impl Cpu {
             0x6B => Ok(self.ld_r_r(Register8::L, Register8::E)),
             0x6C => Ok(self.ld_r_r(Register8::L, Register8::H)),
             0x6D => Ok(self.ld_r_r(Register8::L, Register8::L)),
+            0x6E => Ok(self.ld_r_addr_hl(Register8::L, bus)),
             0x6F => Ok(self.ld_r_r(Register8::L, Register8::A)),
+            0x70 => Ok(self.ld_addr_hl_r(Register8::B, bus)),
+            0x71 => Ok(self.ld_addr_hl_r(Register8::C, bus)),
+            0x72 => Ok(self.ld_addr_hl_r(Register8::D, bus)),
+            0x73 => Ok(self.ld_addr_hl_r(Register8::E, bus)),
+            0x74 => Ok(self.ld_addr_hl_r(Register8::H, bus)),
+            0x75 => Ok(self.ld_addr_hl_r(Register8::L, bus)),
             0x77 => Ok(self.ld_addr_hl_a(bus)),
             0x78 => Ok(self.ld_r_r(Register8::A, Register8::B)),
             0x79 => Ok(self.ld_r_r(Register8::A, Register8::C)),
@@ -240,6 +252,19 @@ impl Cpu {
         self.write_register8(destination, value);
 
         TCycles(4)
+    }
+
+    fn ld_r_addr_hl(&mut self, register: Register8, bus: &Bus) -> TCycles {
+        let value = bus.read8(self.registers.hl());
+        self.write_register8(register, value);
+
+        TCycles(8)
+    }
+
+    fn ld_addr_hl_r(&mut self, register: Register8, bus: &mut Bus) -> TCycles {
+        bus.write8(self.registers.hl(), self.read_register8(register));
+
+        TCycles(8)
     }
 
     fn ld_a_addr_hl(&mut self, bus: &Bus) -> TCycles {
@@ -704,6 +729,72 @@ mod tests {
             0x0102,
             "LD (HL),d8 should consume two bytes"
         );
+    }
+
+    #[test]
+    fn ld_r_addr_hl_reads_memory_pointed_to_by_hl_into_each_register() {
+        let cases = [
+            (0x46, Register8::B),
+            (0x4E, Register8::C),
+            (0x56, Register8::D),
+            (0x5E, Register8::E),
+            (0x66, Register8::H),
+            (0x6E, Register8::L),
+            (0x7E, Register8::A),
+        ];
+
+        for (opcode, register) in cases {
+            let mut bus = bus_with_bytes(&[(0x0100, opcode)]);
+            bus.write8(0xC123, 0x8F);
+            let mut cpu = Cpu::new_dmg_post_boot();
+            cpu.registers.set_hl(0xC123);
+
+            let cycles = cpu.step(&mut bus);
+
+            assert_eq!(
+                cycles,
+                Ok(TCycles(8)),
+                "opcode {opcode:02X} should take 8 T-cycles"
+            );
+            assert_eq!(
+                read_register(&cpu, register),
+                0x8F,
+                "opcode {opcode:02X} should load {register:?} from the old HL address"
+            );
+        }
+    }
+
+    #[test]
+    fn ld_addr_hl_r_writes_each_register_to_memory_pointed_to_by_hl() {
+        let cases = [
+            (0x70, Register8::B, 0xB1),
+            (0x71, Register8::C, 0xC2),
+            (0x72, Register8::D, 0xD3),
+            (0x73, Register8::E, 0xE4),
+            (0x74, Register8::H, 0xC4),
+            (0x75, Register8::L, 0x56),
+            (0x77, Register8::A, 0xA8),
+        ];
+
+        for (opcode, register, value) in cases {
+            let mut bus = bus_with_bytes(&[(0x0100, opcode)]);
+            let mut cpu = Cpu::new_dmg_post_boot();
+            cpu.registers.set_hl(0xC456);
+            cpu.write_register8(register, value);
+
+            let cycles = cpu.step(&mut bus);
+
+            assert_eq!(
+                cycles,
+                Ok(TCycles(8)),
+                "opcode {opcode:02X} should take 8 T-cycles"
+            );
+            assert_eq!(
+                bus.read8(0xC456),
+                value,
+                "opcode {opcode:02X} should write {register:?} to the old HL address"
+            );
+        }
     }
 
     #[test]

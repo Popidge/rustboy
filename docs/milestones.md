@@ -16,6 +16,7 @@ Implement roadmap Stage 5 tasks 5.1 through 5.5 by adding the first CPU load ins
 - Added immediate 16-bit loads for BC, DE, HL, and SP.
 - Added register-to-register loads among A, B, C, D, E, H, and L.
 - Added basic HL-indirect loads: `LD A,(HL)`, `LD (HL),A`, and `LD (HL),d8`.
+- Added the remaining basic HL-indirect register loads: `LD r,(HL)` and `LD (HL),r` for A, B, C, D, E, H, and L.
 - Added special A memory loads and stores through BC, DE, high-memory `a8`, and absolute `a16` addresses.
 - Added small internal CPU helpers for 8-bit registers and register pairs.
 
@@ -23,6 +24,7 @@ Implement roadmap Stage 5 tasks 5.1 through 5.5 by adding the first CPU load ins
 
 - `cargo fmt`
 - `cargo test -p gb-core cpu::tests::ld_r_d8_sets_each_8_bit_register`
+- `cargo test -p gb-core cpu::tests::ld_`
 - `cargo test`
 - `cargo clippy --all-targets --all-features`
 - Added CPU unit tests for each Stage 5 load group, including WRAM and HRAM bus-backed memory cases.

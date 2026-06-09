@@ -1,0 +1,28 @@
+# Rust build output
+/target/
+
+# Local editor and OS noise
+.idea/
+.vscode/
+*.swp
+*.swo
+Thumbs.db
+Desktop.ini
+
+# Local environment and logs
+.env
+.env.*
+*.log
+
+# Local emulator inputs and generated artifacts
+/roms/
+/test-roms/
+/saves/
+/screenshots/
+/traces/
+
+# Profiling and coverage output
+/coverage/
+/tarpaulin-report.html
+*.profraw
+*.profdata

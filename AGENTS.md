@@ -43,7 +43,8 @@ The emulator should eventually support:
 Before making architectural changes, read:
 
 * `docs/architecture.md`
-* `docs/style.md`
+* `docs/styleguide.md`
+* `docs/testing-strategy.md`
 
 Architecture decisions should follow those documents unless the task explicitly asks to revise them.
 
@@ -82,7 +83,7 @@ Agents must:
 
 ## Coding standards
 
-Follow `docs/style.md`.
+Follow `docs/styleguide.md`.
 
 Important defaults:
 
@@ -190,6 +191,8 @@ Include:
 Do not hide uncertainty.
 
 ## Testing expectations
+
+Follow `docs/testing-strategy.md` when adding tests or test tooling.
 
 Before marking a milestone complete, run:
 

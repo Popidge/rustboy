@@ -1,5 +1,41 @@
 # Milestones
 
+## 0010: Add CPU state
+
+Date: 2026-06-09
+
+Status: Complete
+
+### Goal
+
+Implement roadmap Stage 2 tasks 2.1 through 2.4 by modelling CPU registers, register pairs, flags, and the DMG post-boot CPU state.
+
+### Changes
+
+- Added `gb_core::cpu` with `Cpu`, `CpuRegisters`, and `CpuFlags`.
+- Added A, F, B, C, D, E, H, L, SP, and PC register storage.
+- Added AF, BC, DE, and HL get/set helpers.
+- Added Z, N, H, and C flag get/set helpers.
+- Added `Cpu::new_dmg_post_boot` with standard DMG post-boot register values.
+- Added compact `Debug` formatting for CPU registers.
+
+### Tests
+
+- `cargo fmt`
+- `cargo test`
+- `cargo clippy --all-targets --all-features`
+- Added unit tests for zeroed registers, register pairs, lower-nibble masking for F, each flag helper, register debug formatting, and post-boot CPU state.
+
+### Decisions
+
+- Represented `F` with a `CpuFlags` wrapper so the lower nibble is masked at the type boundary.
+- Kept `Cpu` focused on register ownership only; instruction execution and bus access remain future milestones.
+- Added no dependencies.
+
+### Notes
+
+- The post-boot constructor documents that we are seeding CPU state because the boot ROM is not executed yet.
+
 ## 0009: Implement ROM-only cartridge reads
 
 Date: 2026-06-09

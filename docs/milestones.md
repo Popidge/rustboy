@@ -1,5 +1,42 @@
 # Milestones
 
+## 0012: Add CPU fetch and tiny execution loop
+
+Date: 2026-06-09
+
+Status: Complete
+
+### Goal
+
+Implement roadmap Stage 4 tasks 4.1 through 4.4 by adding CPU byte/word fetch, one-instruction stepping for `NOP`, structured unknown-opcode errors, and trace formatting.
+
+### Changes
+
+- Added `TCycles` for explicit CPU T-cycle counts.
+- Added `CpuError::UnimplementedOpcode` with the original opcode fetch PC and opcode byte.
+- Added `Cpu::fetch8` and `Cpu::fetch16`, including wrapping PC increment behavior.
+- Added `Cpu::step` with opcode `0x00` `NOP` returning 4 T-cycles.
+- Added CPU trace formatting that reads the next opcode without mutating CPU state or printing from `gb-core`.
+
+### Tests
+
+- `cargo fmt`
+- `cargo test -p gb-core cpu::tests::fetch8_wraps_pc_after_ffff`
+- `cargo test`
+- `cargo clippy --all-targets --all-features`
+- Added CPU unit tests for fetch byte, fetch word, PC wrapping, NOP stepping, unknown opcode errors, and stable trace output.
+
+### Decisions
+
+- Kept CPU memory access routed through `Bus`.
+- Kept `Cpu::step` fallible because early CPU development should report unimplemented opcodes clearly instead of panicking.
+- Kept trace output as returned strings so `gb-core` remains callback-free and does not print directly.
+- Added no dependencies.
+
+### Notes
+
+- Only `NOP` is executable so far; load instructions begin in Stage 5.
+
 ## 0011: Add basic bus and memory map
 
 Date: 2026-06-09

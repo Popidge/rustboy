@@ -1,5 +1,6 @@
 #![doc = "Core Game Boy emulation primitives."]
 
+pub mod bus;
 pub mod cartridge;
 pub mod cpu;
 

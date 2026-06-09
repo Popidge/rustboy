@@ -1,5 +1,42 @@
 # Milestones
 
+## 0011: Add basic bus and memory map
+
+Date: 2026-06-09
+
+Status: Complete
+
+### Goal
+
+Implement roadmap Stage 3 tasks 3.1 through 3.4 by introducing the bus, routing the first memory regions, and adding little-endian 16-bit helpers.
+
+### Changes
+
+- Added `gb_core::bus::Bus`.
+- Made `Bus` own `Cartridge`, WRAM, HRAM, interrupt enable, and interrupt flags storage.
+- Added `Bus::read8` routing for cartridge ROM, WRAM, HRAM, and IE.
+- Added `Bus::write8` routing for WRAM, HRAM, and IE, with ROM writes ignored for ROM-only cartridges.
+- Added little-endian `Bus::read16` and `Bus::write16`.
+- Returned `0xFF` for unsupported reads until later hardware components exist.
+
+### Tests
+
+- `cargo fmt`
+- `cargo test`
+- `cargo clippy --all-targets --all-features`
+- Added `crates/gb-core/tests/bus_routing.rs` for ROM reads, unsupported reads, WRAM, HRAM, IE, ignored ROM writes, and little-endian 16-bit helpers.
+
+### Decisions
+
+- Kept fixed internal memory as arrays: `[u8; 0x2000]` for WRAM and `[u8; 0x7F]` for HRAM.
+- Kept interrupt flags owned by `Bus` but not memory-routed yet; `0xFF0F` is scheduled for Stage 10.
+- Converted cartridge read errors to `0xFF` at the bus boundary to match the runtime bus API.
+- Added no dependencies.
+
+### Notes
+
+- PPU, timer, serial, joypad, APU, echo RAM, external RAM, and IF routing remain future milestones.
+
 ## 0010: Add CPU state
 
 Date: 2026-06-09

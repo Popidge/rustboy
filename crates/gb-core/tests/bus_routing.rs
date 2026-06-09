@@ -1,0 +1,153 @@
+mod common;
+
+use common::minimal_rom_with_entry_point;
+use gb_core::{bus::Bus, cartridge::Cartridge};
+
+const TITLE_START: usize = 0x0134;
+const CARTRIDGE_TYPE_ADDR: usize = 0x0147;
+const ROM_SIZE_ADDR: usize = 0x0148;
+const RAM_SIZE_ADDR: usize = 0x0149;
+const HEADER_CHECKSUM_START: usize = 0x0134;
+const HEADER_CHECKSUM_END_INCLUSIVE: usize = 0x014C;
+const HEADER_CHECKSUM_ADDR: usize = 0x014D;
+
+fn test_bus_with_rom_byte(address: usize, value: u8) -> Bus {
+    let mut rom = minimal_rom_with_entry_point(&[]);
+    rom[TITLE_START..TITLE_START + 7].copy_from_slice(b"BUSTEST");
+    rom[CARTRIDGE_TYPE_ADDR] = 0x00;
+    rom[ROM_SIZE_ADDR] = 0x00;
+    rom[RAM_SIZE_ADDR] = 0x00;
+    rom[address] = value;
+    rom[HEADER_CHECKSUM_ADDR] = calculate_header_checksum(&rom);
+
+    let cartridge = Cartridge::from_bytes(rom).expect("test ROM should parse");
+    Bus::new(cartridge)
+}
+
+fn calculate_header_checksum(rom: &[u8]) -> u8 {
+    rom[HEADER_CHECKSUM_START..=HEADER_CHECKSUM_END_INCLUSIVE]
+        .iter()
+        .fold(0_u8, |checksum, byte| {
+            checksum.wrapping_sub(*byte).wrapping_sub(1)
+        })
+}
+
+#[test]
+fn read8_routes_cartridge_rom_reads() {
+    let bus = test_bus_with_rom_byte(0x0100, 0x42);
+
+    assert_eq!(
+        bus.read8(0x0100),
+        0x42,
+        "0x0100 should read from cartridge ROM through the bus"
+    );
+}
+
+#[test]
+fn read8_returns_ff_for_unsupported_addresses() {
+    let bus = test_bus_with_rom_byte(0x0100, 0x42);
+
+    assert_eq!(
+        bus.read8(0x8000),
+        0xFF,
+        "unsupported memory regions should read as 0xFF for now"
+    );
+}
+
+#[test]
+fn write8_roundtrips_wram() {
+    let mut bus = test_bus_with_rom_byte(0x0100, 0x42);
+
+    bus.write8(0xC000, 0x12);
+    bus.write8(0xDFFF, 0x34);
+
+    assert_eq!(bus.read8(0xC000), 0x12, "WRAM start should roundtrip");
+    assert_eq!(bus.read8(0xDFFF), 0x34, "WRAM end should roundtrip");
+}
+
+#[test]
+fn write8_roundtrips_hram() {
+    let mut bus = test_bus_with_rom_byte(0x0100, 0x42);
+
+    bus.write8(0xFF80, 0x56);
+    bus.write8(0xFFFE, 0x78);
+
+    assert_eq!(bus.read8(0xFF80), 0x56, "HRAM start should roundtrip");
+    assert_eq!(bus.read8(0xFFFE), 0x78, "HRAM end should roundtrip");
+}
+
+#[test]
+fn write8_roundtrips_interrupt_enable() {
+    let mut bus = test_bus_with_rom_byte(0x0100, 0x42);
+
+    bus.write8(0xFFFF, 0x1F);
+
+    assert_eq!(
+        bus.read8(0xFFFF),
+        0x1F,
+        "0xFFFF should read and write the interrupt enable register"
+    );
+}
+
+#[test]
+fn write8_ignores_rom_for_rom_only_cartridge() {
+    let mut bus = test_bus_with_rom_byte(0x0100, 0x42);
+
+    bus.write8(0x0100, 0x99);
+
+    assert_eq!(
+        bus.read8(0x0100),
+        0x42,
+        "writes to ROM should not alter ROM-only cartridge data"
+    );
+}
+
+#[test]
+fn read16_reads_little_endian_values() {
+    let mut bus = test_bus_with_rom_byte(0x0100, 0x42);
+    bus.write8(0xC000, 0x34);
+    bus.write8(0xC001, 0x12);
+
+    assert_eq!(
+        bus.read16(0xC000),
+        0x1234,
+        "read16 should combine low byte first, then high byte"
+    );
+}
+
+#[test]
+fn write16_writes_little_endian_values() {
+    let mut bus = test_bus_with_rom_byte(0x0100, 0x42);
+
+    bus.write16(0xC000, 0x1234);
+
+    assert_eq!(bus.read8(0xC000), 0x34, "low byte should be written first");
+    assert_eq!(
+        bus.read8(0xC001),
+        0x12,
+        "high byte should be written second"
+    );
+}
+
+#[test]
+fn read16_and_write16_wrap_address_for_second_byte() {
+    let mut bus = test_bus_with_rom_byte(0x0000, 0x12);
+
+    bus.write16(0xFFFF, 0xABCD);
+
+    assert_eq!(
+        bus.read8(0xFFFF),
+        0xCD,
+        "first byte at 0xFFFF should write interrupt enable"
+    );
+    assert_eq!(
+        bus.read8(0x0000),
+        0x12,
+        "second byte wraps to ROM and should be ignored for ROM-only cartridges"
+    );
+    assert_eq!(
+        bus.read16(0xFFFF),
+        0x12CD,
+        "read16 should use wrapping address arithmetic for the high byte"
+    );
+}

@@ -1,5 +1,7 @@
 #![doc = "Core Game Boy emulation primitives."]
 
+pub mod cartridge;
+
 /// Placeholder type for the emulator core.
 #[derive(Debug, Default)]
 pub struct GameBoy;

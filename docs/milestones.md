@@ -1,5 +1,43 @@
 # Milestones
 
+## 0014: Implement CPU arithmetic instructions
+
+Date: 2026-06-10
+
+Status: Complete
+
+### Goal
+
+Implement roadmap Stages 6 and 7 by adding 8-bit ALU instructions, flag-specific accumulator operations, and 16-bit/SP arithmetic.
+
+### Changes
+
+- Added `INC r` and `DEC r` for A, B, C, D, E, H, and L.
+- Added register and immediate ALU operations: `ADD`, `ADC`, `SUB`, `SBC`, `AND`, `OR`, `XOR`, and `CP`.
+- Added `DAA`, `CPL`, `SCF`, and `CCF`.
+- Added 16-bit `INC rr`, `DEC rr`, `ADD HL,rr`, `ADD SP,e8`, `LD HL,SP+e8`, and `LD SP,HL`.
+- Added focused ALU helpers for shared flag behavior.
+
+### Tests
+
+- `cargo fmt`
+- `cargo test -p gb-core cpu::tests`
+- `cargo test`
+- `cargo clippy --all-targets --all-features`
+- Added CPU unit tests for wrapping arithmetic, zero/carry/half-carry/subtract flags, carry-in and borrow behavior, DAA edge cases, CP result preservation, 16-bit flag preservation, and signed stack-pointer offsets.
+
+### Decisions
+
+- Kept opcode dispatch explicit and allowed the long `step` match locally to preserve the learning-first opcode layout.
+- Used shared ALU helpers for arithmetic flag rules while keeping opcode decoding plain.
+- Treated signed `e8` operands with `u8::cast_signed()` and `wrapping_add_signed` so positive and negative offsets stay explicit.
+- Added no dependencies.
+
+### Notes
+
+- Arithmetic involving the `(HL)` memory operand is not included yet; this milestone follows the roadmap wording for register and immediate arithmetic.
+- Jump, stack, rotate/shift, CB-prefixed, interrupt, and control instructions remain future milestones.
+
 ## 0013: Implement CPU load instructions
 
 Date: 2026-06-10

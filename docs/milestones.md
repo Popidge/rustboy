@@ -1,5 +1,44 @@
 # Milestones
 
+## 0013: Implement CPU load instructions
+
+Date: 2026-06-10
+
+Status: Complete
+
+### Goal
+
+Implement roadmap Stage 5 tasks 5.1 through 5.5 by adding the first CPU load instruction groups.
+
+### Changes
+
+- Added immediate 8-bit loads for A, B, C, D, E, H, and L.
+- Added immediate 16-bit loads for BC, DE, HL, and SP.
+- Added register-to-register loads among A, B, C, D, E, H, and L.
+- Added basic HL-indirect loads: `LD A,(HL)`, `LD (HL),A`, and `LD (HL),d8`.
+- Added special A memory loads and stores through BC, DE, high-memory `a8`, and absolute `a16` addresses.
+- Added small internal CPU helpers for 8-bit registers and register pairs.
+
+### Tests
+
+- `cargo fmt`
+- `cargo test -p gb-core cpu::tests::ld_r_d8_sets_each_8_bit_register`
+- `cargo test`
+- `cargo clippy --all-targets --all-features`
+- Added CPU unit tests for each Stage 5 load group, including WRAM and HRAM bus-backed memory cases.
+
+### Decisions
+
+- Kept opcode dispatch as explicit `match` arms with no generated table or macro.
+- Kept all memory-facing instruction behavior routed through `Bus`.
+- Limited Stage 5.3 register-to-register coverage to A/B/C/D/E/H/L register operands; broader `(HL)` table variants remain future CPU work unless called out by a later milestone.
+- Added no dependencies.
+
+### Notes
+
+- Load instructions do not modify flags, so this milestone intentionally leaves flag behavior unchanged.
+- Arithmetic, jumps, stack operations, interrupts, and the remaining load-family variants are still future milestones.
+
 ## 0012: Add CPU fetch and tiny execution loop
 
 Date: 2026-06-09

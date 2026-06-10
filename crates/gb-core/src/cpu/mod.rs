@@ -23,6 +23,14 @@ enum Register8 {
     L,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Condition {
+    NotZero,
+    Zero,
+    NotCarry,
+    Carry,
+}
+
 /// CPU cycle count measured in Game Boy T-cycles.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct TCycles(pub u32);
@@ -128,22 +136,27 @@ impl Cpu {
             0x1C => Ok(self.inc_r(Register8::E)),
             0x1D => Ok(self.dec_r(Register8::E)),
             0x1E => Ok(self.ld_r_d8(Register8::E, bus)),
+            0x18 => Ok(self.jr_e8(bus)),
+            0x20 => Ok(self.jr_cc_e8(Condition::NotZero, bus)),
             0x21 => Ok(self.ld_rr_d16(RegisterPair::HL, bus)),
             0x23 => Ok(self.inc_rr(RegisterPair::HL)),
             0x24 => Ok(self.inc_r(Register8::H)),
             0x25 => Ok(self.dec_r(Register8::H)),
             0x26 => Ok(self.ld_r_d8(Register8::H, bus)),
             0x27 => Ok(self.daa()),
+            0x28 => Ok(self.jr_cc_e8(Condition::Zero, bus)),
             0x29 => Ok(self.add_hl_rr(RegisterPair::HL)),
             0x2B => Ok(self.dec_rr(RegisterPair::HL)),
             0x2C => Ok(self.inc_r(Register8::L)),
             0x2D => Ok(self.dec_r(Register8::L)),
             0x2E => Ok(self.ld_r_d8(Register8::L, bus)),
             0x2F => Ok(self.cpl()),
+            0x30 => Ok(self.jr_cc_e8(Condition::NotCarry, bus)),
             0x31 => Ok(self.ld_rr_d16(RegisterPair::SP, bus)),
             0x33 => Ok(self.inc_rr(RegisterPair::SP)),
             0x36 => Ok(self.ld_addr_hl_d8(bus)),
             0x37 => Ok(self.scf()),
+            0x38 => Ok(self.jr_cc_e8(Condition::Carry, bus)),
             0x39 => Ok(self.add_hl_rr(RegisterPair::SP)),
             0x3B => Ok(self.dec_rr(RegisterPair::SP)),
             0x3C => Ok(self.inc_r(Register8::A)),
@@ -269,21 +282,45 @@ impl Cpu {
             0xBC => Ok(self.cp_a_r(Register8::H)),
             0xBD => Ok(self.cp_a_r(Register8::L)),
             0xBF => Ok(self.cp_a_r(Register8::A)),
+            0xC0 => Ok(self.ret_cc(Condition::NotZero, bus)),
+            0xC2 => Ok(self.jp_cc_a16(Condition::NotZero, bus)),
+            0xC3 => Ok(self.jp_a16(bus)),
+            0xC4 => Ok(self.call_cc_a16(Condition::NotZero, bus)),
             0xC6 => Ok(self.add_a_d8(bus)),
+            0xC7 => Ok(self.rst(0x00, bus)),
+            0xC8 => Ok(self.ret_cc(Condition::Zero, bus)),
+            0xC9 => Ok(self.ret(bus)),
+            0xCA => Ok(self.jp_cc_a16(Condition::Zero, bus)),
+            0xCC => Ok(self.call_cc_a16(Condition::Zero, bus)),
+            0xCD => Ok(self.call_a16(bus)),
             0xCE => Ok(self.adc_a_d8(bus)),
+            0xCF => Ok(self.rst(0x08, bus)),
+            0xD0 => Ok(self.ret_cc(Condition::NotCarry, bus)),
+            0xD2 => Ok(self.jp_cc_a16(Condition::NotCarry, bus)),
+            0xD4 => Ok(self.call_cc_a16(Condition::NotCarry, bus)),
             0xD6 => Ok(self.sub_a_d8(bus)),
+            0xD7 => Ok(self.rst(0x10, bus)),
+            0xD8 => Ok(self.ret_cc(Condition::Carry, bus)),
+            0xDA => Ok(self.jp_cc_a16(Condition::Carry, bus)),
+            0xDC => Ok(self.call_cc_a16(Condition::Carry, bus)),
             0xDE => Ok(self.sbc_a_d8(bus)),
+            0xDF => Ok(self.rst(0x18, bus)),
             0xE0 => Ok(self.ldh_addr_a8_a(bus)),
             0xE6 => Ok(self.and_a_d8(bus)),
+            0xE7 => Ok(self.rst(0x20, bus)),
             0xE8 => Ok(self.add_sp_e8(bus)),
+            0xE9 => Ok(self.jp_hl()),
             0xEA => Ok(self.ld_addr_a16_a(bus)),
             0xEE => Ok(self.xor_a_d8(bus)),
+            0xEF => Ok(self.rst(0x28, bus)),
             0xF0 => Ok(self.ldh_a_addr_a8(bus)),
             0xF6 => Ok(self.or_a_d8(bus)),
+            0xF7 => Ok(self.rst(0x30, bus)),
             0xF8 => Ok(self.ld_hl_sp_e8(bus)),
             0xF9 => Ok(self.ld_sp_hl()),
             0xFA => Ok(self.ld_a_addr_a16(bus)),
             0xFE => Ok(self.cp_a_d8(bus)),
+            0xFF => Ok(self.rst(0x38, bus)),
             _ => Err(CpuError::UnimplementedOpcode { pc, opcode }),
         }
     }
@@ -785,6 +822,117 @@ impl Cpu {
         self.registers
             .f
             .set_carry((sp & 0x00FF) + u16::from(offset) > 0x00FF);
+    }
+
+    fn jp_a16(&mut self, bus: &Bus) -> TCycles {
+        self.registers.pc = self.fetch16(bus);
+
+        TCycles(16)
+    }
+
+    fn jp_hl(&mut self) -> TCycles {
+        self.registers.pc = self.registers.hl();
+
+        TCycles(4)
+    }
+
+    fn jp_cc_a16(&mut self, condition: Condition, bus: &Bus) -> TCycles {
+        let address = self.fetch16(bus);
+
+        if self.condition_is_met(condition) {
+            self.registers.pc = address;
+            TCycles(16)
+        } else {
+            TCycles(12)
+        }
+    }
+
+    fn jr_e8(&mut self, bus: &Bus) -> TCycles {
+        let offset = self.fetch8(bus);
+        self.relative_jump(offset);
+
+        TCycles(12)
+    }
+
+    fn jr_cc_e8(&mut self, condition: Condition, bus: &Bus) -> TCycles {
+        let offset = self.fetch8(bus);
+
+        if self.condition_is_met(condition) {
+            self.relative_jump(offset);
+            TCycles(12)
+        } else {
+            TCycles(8)
+        }
+    }
+
+    fn relative_jump(&mut self, offset: u8) {
+        self.registers.pc = self
+            .registers
+            .pc
+            .wrapping_add_signed(i16::from(offset.cast_signed()));
+    }
+
+    fn call_a16(&mut self, bus: &mut Bus) -> TCycles {
+        let address = self.fetch16(bus);
+        self.push16(bus, self.registers.pc);
+        self.registers.pc = address;
+
+        TCycles(24)
+    }
+
+    fn call_cc_a16(&mut self, condition: Condition, bus: &mut Bus) -> TCycles {
+        let address = self.fetch16(bus);
+
+        if self.condition_is_met(condition) {
+            self.push16(bus, self.registers.pc);
+            self.registers.pc = address;
+            TCycles(24)
+        } else {
+            TCycles(12)
+        }
+    }
+
+    fn ret(&mut self, bus: &Bus) -> TCycles {
+        self.registers.pc = self.pop16(bus);
+
+        TCycles(16)
+    }
+
+    fn ret_cc(&mut self, condition: Condition, bus: &Bus) -> TCycles {
+        if self.condition_is_met(condition) {
+            self.registers.pc = self.pop16(bus);
+            TCycles(20)
+        } else {
+            TCycles(8)
+        }
+    }
+
+    fn rst(&mut self, vector: u16, bus: &mut Bus) -> TCycles {
+        self.push16(bus, self.registers.pc);
+        self.registers.pc = vector;
+
+        TCycles(16)
+    }
+
+    fn push16(&mut self, bus: &mut Bus, value: u16) {
+        self.registers.sp = self.registers.sp.wrapping_sub(2);
+        bus.write16(self.registers.sp, value);
+    }
+
+    fn pop16(&mut self, bus: &Bus) -> u16 {
+        let value = bus.read16(self.registers.sp);
+        self.registers.sp = self.registers.sp.wrapping_add(2);
+
+        value
+    }
+
+    fn condition_is_met(&self, condition: Condition) -> bool {
+        match condition {
+            Condition::NotZero => !self.registers.f.zero(),
+            Condition::Zero => self.registers.f.zero(),
+            Condition::NotCarry => !self.registers.f.carry(),
+            Condition::Carry => self.registers.f.carry(),
+        }
     }
 }
 
@@ -1900,5 +2048,318 @@ mod tests {
             0xF0,
             "LD SP,HL should not change flags"
         );
+    }
+
+    #[test]
+    fn jp_a16_and_jp_hl_set_pc_to_absolute_targets() {
+        let (cpu, _bus, cycles) = run_instruction(&[0xC3, 0x34, 0xC1]);
+
+        assert_eq!(cycles, TCycles(16), "JP a16 should take 16 T-cycles");
+        assert_eq!(cpu.registers().pc, 0xC134, "JP a16 should load PC from d16");
+
+        let mut bus = bus_with_bytes(&[(0x0100, 0xE9)]);
+        let mut cpu = Cpu::new_dmg_post_boot();
+        cpu.registers.set_hl(0xC456);
+
+        let cycles = cpu.step(&mut bus);
+
+        assert_eq!(cycles, Ok(TCycles(4)), "JP HL should take 4 T-cycles");
+        assert_eq!(cpu.registers().pc, 0xC456, "JP HL should copy HL to PC");
+    }
+
+    #[test]
+    fn jr_e8_jumps_relative_to_pc_after_operand_fetch() {
+        let (cpu, _bus, cycles) = run_instruction(&[0x18, 0x05]);
+
+        assert_eq!(cycles, TCycles(12), "JR e8 should take 12 T-cycles");
+        assert_eq!(
+            cpu.registers().pc,
+            0x0107,
+            "positive JR offset should be relative to PC after operand"
+        );
+
+        let (cpu, _bus, cycles) = run_instruction(&[0x18, 0xFE]);
+
+        assert_eq!(cycles, TCycles(12), "JR e8 should take 12 T-cycles");
+        assert_eq!(
+            cpu.registers().pc,
+            0x0100,
+            "negative JR offset should wrap from PC after operand"
+        );
+    }
+
+    #[test]
+    fn conditional_jp_uses_condition_and_taken_cycle_count() {
+        let cases = [
+            (
+                0xC2,
+                false,
+                false,
+                true,
+                TCycles(16),
+                0xC000,
+                "JP NZ,a16 taken",
+            ),
+            (
+                0xC2,
+                true,
+                false,
+                false,
+                TCycles(12),
+                0x0103,
+                "JP NZ,a16 not taken",
+            ),
+            (
+                0xCA,
+                true,
+                false,
+                true,
+                TCycles(16),
+                0xC000,
+                "JP Z,a16 taken",
+            ),
+            (
+                0xD2,
+                false,
+                false,
+                true,
+                TCycles(16),
+                0xC000,
+                "JP NC,a16 taken",
+            ),
+            (
+                0xDA,
+                false,
+                true,
+                true,
+                TCycles(16),
+                0xC000,
+                "JP C,a16 taken",
+            ),
+            (
+                0xDA,
+                false,
+                false,
+                false,
+                TCycles(12),
+                0x0103,
+                "JP C,a16 not taken",
+            ),
+        ];
+
+        for (opcode, zero, carry, taken, expected_cycles, expected_pc, name) in cases {
+            let mut bus = bus_with_bytes(&[(0x0100, opcode), (0x0101, 0x00), (0x0102, 0xC0)]);
+            let mut cpu = Cpu::new_dmg_post_boot();
+            cpu.registers.f.set_zero(zero);
+            cpu.registers.f.set_carry(carry);
+
+            let cycles = cpu.step(&mut bus);
+
+            assert_eq!(cycles, Ok(expected_cycles), "{name} cycles");
+            assert_eq!(cpu.registers().pc, expected_pc, "{name} PC");
+            assert_eq!(
+                taken,
+                expected_pc == 0xC000,
+                "{name} test case should describe branch direction"
+            );
+        }
+    }
+
+    #[test]
+    fn conditional_jr_uses_condition_and_taken_cycle_count() {
+        let cases = [
+            (0x20, false, false, TCycles(12), 0x0104, "JR NZ,e8 taken"),
+            (0x20, true, false, TCycles(8), 0x0102, "JR NZ,e8 not taken"),
+            (0x28, true, false, TCycles(12), 0x0104, "JR Z,e8 taken"),
+            (0x30, false, false, TCycles(12), 0x0104, "JR NC,e8 taken"),
+            (0x38, false, true, TCycles(12), 0x0104, "JR C,e8 taken"),
+            (0x38, false, false, TCycles(8), 0x0102, "JR C,e8 not taken"),
+        ];
+
+        for (opcode, zero, carry, expected_cycles, expected_pc, name) in cases {
+            let mut bus = bus_with_bytes(&[(0x0100, opcode), (0x0101, 0x02)]);
+            let mut cpu = Cpu::new_dmg_post_boot();
+            cpu.registers.f.set_zero(zero);
+            cpu.registers.f.set_carry(carry);
+
+            let cycles = cpu.step(&mut bus);
+
+            assert_eq!(cycles, Ok(expected_cycles), "{name} cycles");
+            assert_eq!(cpu.registers().pc, expected_pc, "{name} PC");
+        }
+    }
+
+    #[test]
+    fn push16_and_pop16_use_little_endian_stack_memory_and_restore_sp() {
+        let mut bus = bus_with_bytes(&[]);
+        let mut cpu = Cpu::new_dmg_post_boot();
+        cpu.registers.sp = 0xC100;
+
+        cpu.push16(&mut bus, 0x1234);
+
+        assert_eq!(
+            cpu.registers().sp,
+            0xC0FE,
+            "push16 should decrement SP by two"
+        );
+        assert_eq!(
+            bus.read8(0xC0FE),
+            0x34,
+            "push16 should store low byte first"
+        );
+        assert_eq!(
+            bus.read8(0xC0FF),
+            0x12,
+            "push16 should store high byte second"
+        );
+
+        let value = cpu.pop16(&bus);
+
+        assert_eq!(value, 0x1234, "pop16 should read the pushed value");
+        assert_eq!(cpu.registers().sp, 0xC100, "pop16 should restore SP by two");
+    }
+
+    #[test]
+    fn call_pushes_return_address_and_ret_restores_it() {
+        let mut bus = bus_with_bytes(&[(0x0100, 0xCD), (0x0101, 0x00), (0x0102, 0xC2)]);
+        let mut cpu = Cpu::new_dmg_post_boot();
+        cpu.registers.sp = 0xC100;
+
+        let cycles = cpu.step(&mut bus);
+
+        assert_eq!(cycles, Ok(TCycles(24)), "CALL a16 should take 24 T-cycles");
+        assert_eq!(cpu.registers().pc, 0xC200, "CALL should jump to a16");
+        assert_eq!(
+            cpu.registers().sp,
+            0xC0FE,
+            "CALL should push onto the stack"
+        );
+        assert_eq!(
+            bus.read16(cpu.registers().sp),
+            0x0103,
+            "CALL should push the address after its operand"
+        );
+
+        bus.write8(0xC200, 0xC9);
+        let cycles = cpu.step(&mut bus);
+
+        assert_eq!(cycles, Ok(TCycles(16)), "RET should take 16 T-cycles");
+        assert_eq!(cpu.registers().pc, 0x0103, "RET should restore pushed PC");
+        assert_eq!(cpu.registers().sp, 0xC100, "RET should pop the stack");
+    }
+
+    #[test]
+    fn conditional_call_and_ret_use_taken_and_not_taken_cycles() {
+        let mut bus = bus_with_bytes(&[(0x0100, 0xC4), (0x0101, 0x00), (0x0102, 0xC3)]);
+        let mut cpu = Cpu::new_dmg_post_boot();
+        cpu.registers.sp = 0xC100;
+        cpu.registers.f.set_zero(false);
+
+        let cycles = cpu.step(&mut bus);
+
+        assert_eq!(
+            cycles,
+            Ok(TCycles(24)),
+            "taken CALL cc,a16 should take 24 T-cycles"
+        );
+        assert_eq!(cpu.registers().pc, 0xC300, "taken CALL should jump");
+        assert_eq!(
+            bus.read16(cpu.registers().sp),
+            0x0103,
+            "taken CALL return address"
+        );
+
+        let mut bus = bus_with_bytes(&[(0x0100, 0xC4), (0x0101, 0x00), (0x0102, 0xC3)]);
+        let mut cpu = Cpu::new_dmg_post_boot();
+        cpu.registers.sp = 0xC100;
+        cpu.registers.f.set_zero(true);
+
+        let cycles = cpu.step(&mut bus);
+
+        assert_eq!(
+            cycles,
+            Ok(TCycles(12)),
+            "not-taken CALL cc,a16 should take 12 T-cycles"
+        );
+        assert_eq!(
+            cpu.registers().pc,
+            0x0103,
+            "not-taken CALL should only consume operand"
+        );
+        assert_eq!(cpu.registers().sp, 0xC100, "not-taken CALL should not push");
+
+        let mut bus = bus_with_bytes(&[(0x0100, 0xC0)]);
+        let mut cpu = Cpu::new_dmg_post_boot();
+        cpu.registers.sp = 0xC100;
+        bus.write16(0xC100, 0xC400);
+        cpu.registers.f.set_zero(false);
+
+        let cycles = cpu.step(&mut bus);
+
+        assert_eq!(
+            cycles,
+            Ok(TCycles(20)),
+            "taken RET cc should take 20 T-cycles"
+        );
+        assert_eq!(cpu.registers().pc, 0xC400, "taken RET should pop PC");
+        assert_eq!(cpu.registers().sp, 0xC102, "taken RET should advance SP");
+
+        let mut bus = bus_with_bytes(&[(0x0100, 0xC0)]);
+        let mut cpu = Cpu::new_dmg_post_boot();
+        cpu.registers.sp = 0xC100;
+        bus.write16(0xC100, 0xC400);
+        cpu.registers.f.set_zero(true);
+
+        let cycles = cpu.step(&mut bus);
+
+        assert_eq!(
+            cycles,
+            Ok(TCycles(8)),
+            "not-taken RET cc should take 8 T-cycles"
+        );
+        assert_eq!(
+            cpu.registers().pc,
+            0x0101,
+            "not-taken RET should only consume opcode"
+        );
+        assert_eq!(cpu.registers().sp, 0xC100, "not-taken RET should not pop");
+    }
+
+    #[test]
+    fn rst_pushes_return_address_and_jumps_to_each_vector() {
+        let cases = [
+            (0xC7, 0x00),
+            (0xCF, 0x08),
+            (0xD7, 0x10),
+            (0xDF, 0x18),
+            (0xE7, 0x20),
+            (0xEF, 0x28),
+            (0xF7, 0x30),
+            (0xFF, 0x38),
+        ];
+
+        for (opcode, vector) in cases {
+            let mut bus = bus_with_bytes(&[(0x0100, opcode)]);
+            let mut cpu = Cpu::new_dmg_post_boot();
+            cpu.registers.sp = 0xC100;
+
+            let cycles = cpu.step(&mut bus);
+
+            assert_eq!(
+                cycles,
+                Ok(TCycles(16)),
+                "RST {vector:02X} should take 16 T-cycles"
+            );
+            assert_eq!(
+                cpu.registers().pc,
+                vector,
+                "opcode {opcode:02X} should jump to its reset vector"
+            );
+            assert_eq!(
+                bus.read16(cpu.registers().sp),
+                0x0101,
+                "RST should push the address after the opcode"
+            );
+        }
     }
 }

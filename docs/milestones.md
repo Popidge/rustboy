@@ -1,5 +1,42 @@
 # Milestones
 
+## 0015: Implement CPU control flow instructions
+
+Date: 2026-06-10
+
+Status: Complete
+
+### Goal
+
+Implement roadmap Stage 8 by adding jumps, relative branches, stack primitives, calls, returns, and reset-vector calls.
+
+### Changes
+
+- Added `JP a16`, `JP HL`, `JR e8`, conditional `JP cc,a16`, and conditional `JR cc,e8`.
+- Added CPU stack helpers for 16-bit push/pop through `Bus`.
+- Added `CALL a16`, `RET`, conditional `CALL cc,a16`, conditional `RET cc`, and all `RST` vectors.
+- Added a small internal `Condition` enum for NZ/Z/NC/C branch checks.
+
+### Tests
+
+- `cargo fmt`
+- `cargo test -p gb-core cpu::tests`
+- `cargo test`
+- `cargo clippy --all-targets --all-features`
+- Added CPU unit tests for absolute and relative jumps, taken and not-taken conditional cycles, stack byte ordering, CALL/RET stack behavior, conditional CALL/RET, and every RST vector.
+
+### Decisions
+
+- Kept opcode dispatch explicit in the existing `step` match.
+- Kept stack helpers private to `Cpu` for now; tests cover them from the CPU module without expanding the public API.
+- Used `u8::cast_signed()` plus `wrapping_add_signed` for signed relative offsets.
+- Added no dependencies.
+
+### Notes
+
+- Interrupt-driven stack use will build on the same push/pop helpers in Stage 10.
+- Rotate/shift and CB-prefixed opcodes remain future milestones.
+
 ## 0014: Implement CPU arithmetic instructions
 
 Date: 2026-06-10

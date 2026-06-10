@@ -65,7 +65,7 @@ fn read8_returns_ff_for_unsupported_addresses() {
     let bus = test_bus_with_rom_byte(0x0100, 0x42);
 
     assert_eq!(
-        bus.read8(0x8000),
+        bus.read8(0xA000),
         0xFF,
         "unsupported memory regions should read as 0xFF for now"
     );
@@ -191,6 +191,98 @@ fn serial_registers_are_routed_and_output_can_be_drained() {
     assert!(
         bus.serial_output().is_empty(),
         "take_serial_output should drain the buffer"
+    );
+}
+
+#[test]
+fn vram_reads_and_writes_route_through_ppu() {
+    let mut bus = test_bus_with_rom_byte(0x0100, 0x42);
+
+    bus.write8(0x8000, 0x12);
+    bus.write8(0x9FFF, 0x34);
+
+    assert_eq!(
+        bus.read8(0x8000),
+        0x12,
+        "VRAM start should roundtrip through PPU"
+    );
+    assert_eq!(
+        bus.read8(0x9FFF),
+        0x34,
+        "VRAM end should roundtrip through PPU"
+    );
+}
+
+#[test]
+fn oam_reads_and_writes_route_through_ppu_and_unusable_oam_reads_ff() {
+    let mut bus = test_bus_with_rom_byte(0x0100, 0x42);
+
+    bus.write8(0xFE00, 0x56);
+    bus.write8(0xFE9F, 0x78);
+    bus.write8(0xFEA0, 0x99);
+
+    assert_eq!(
+        bus.read8(0xFE00),
+        0x56,
+        "OAM start should roundtrip through PPU"
+    );
+    assert_eq!(
+        bus.read8(0xFE9F),
+        0x78,
+        "OAM end should roundtrip through PPU"
+    );
+    assert_eq!(
+        bus.read8(0xFEA0),
+        0xFF,
+        "unusable OAM range should read as 0xFF"
+    );
+    assert_eq!(
+        bus.read8(0xFEFF),
+        0xFF,
+        "unusable OAM range end should read as 0xFF"
+    );
+}
+
+#[test]
+fn lcd_registers_route_through_ppu() {
+    let mut bus = test_bus_with_rom_byte(0x0100, 0x42);
+
+    bus.write8(0xFF40, 0x80);
+    bus.write8(0xFF42, 0x11);
+    bus.write8(0xFF43, 0x22);
+    bus.write8(0xFF44, 0x99);
+    bus.write8(0xFF45, 0x33);
+    bus.write8(0xFF47, 0xE4);
+    bus.write8(0xFF48, 0xD2);
+    bus.write8(0xFF49, 0xC1);
+    bus.write8(0xFF4A, 0x44);
+    bus.write8(0xFF4B, 0x55);
+
+    assert_eq!(bus.read8(0xFF40), 0x80, "LCDC should route through PPU");
+    assert_eq!(bus.read8(0xFF42), 0x11, "SCY should route through PPU");
+    assert_eq!(bus.read8(0xFF43), 0x22, "SCX should route through PPU");
+    assert_eq!(bus.read8(0xFF44), 0x00, "LY should ignore CPU writes");
+    assert_eq!(bus.read8(0xFF45), 0x33, "LYC should route through PPU");
+    assert_eq!(bus.read8(0xFF47), 0xE4, "BGP should route through PPU");
+    assert_eq!(bus.read8(0xFF48), 0xD2, "OBP0 should route through PPU");
+    assert_eq!(bus.read8(0xFF49), 0xC1, "OBP1 should route through PPU");
+    assert_eq!(bus.read8(0xFF4A), 0x44, "WY should route through PPU");
+    assert_eq!(bus.read8(0xFF4B), 0x55, "WX should route through PPU");
+}
+
+#[test]
+fn ppu_tick_advances_ly_and_requests_vblank_interrupt() {
+    let mut bus = test_bus_with_rom_byte(0x0100, 0x42);
+
+    bus.tick(TCycles(456));
+    assert_eq!(bus.read8(0xFF44), 1, "PPU tick should increment LY");
+
+    bus.tick(TCycles(456 * 143));
+    assert_eq!(bus.read8(0xFF44), 144, "line 144 starts VBlank");
+    assert_eq!(
+        bus.interrupt_flags(),
+        Interrupt::VBlank.mask(),
+        "entering line 144 should request VBlank"
     );
 }
 

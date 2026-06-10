@@ -1,5 +1,105 @@
 # Milestones
 
+## 0023: Add PPU timing
+
+Date: 2026-06-10
+
+Status: Complete
+
+### Goal
+
+Implement roadmap Stage 16 by advancing the PPU by T-cycles, tracking scanlines, requesting VBlank, exposing STAT mode bits, and rendering visible lines as timing reaches them.
+
+### Changes
+
+- Added `Ppu::tick` with 456 T-cycles per scanline and 154 lines per frame.
+- Incremented and wrapped `LY`, requested VBlank when entering line 144, and exposed basic OAM/Transfer/HBlank/VBlank mode bits through `STAT`.
+- Rendered visible scanlines during PPU ticking and added frame-ready helpers through the bus.
+
+### Tests
+
+- `cargo fmt`
+- `cargo test`
+- `cargo clippy --all-targets --all-features`
+- Added PPU unit tests for `LY` progression, wraparound, mode transitions, and bus-level VBlank interrupt requests.
+
+### Decisions
+
+- Used simple scanline timing constants: 80 dots OAM, 172 dots transfer, remaining dots HBlank.
+- Requested only the VBlank interrupt for now; STAT interrupt source enables are left for a later accuracy milestone.
+- Added no dependencies.
+
+### Notes
+
+- Line rendering is background-only; sprites and window rendering remain later roadmap stages.
+
+## 0022: Decode tiles and render background
+
+Date: 2026-06-10
+
+Status: Complete
+
+### Goal
+
+Implement roadmap Stage 15 by decoding Game Boy tile data and rendering a scrollable background into a simple DMG greyscale framebuffer.
+
+### Changes
+
+- Added tile-row and full-tile decoding from 2-bit planar tile bytes.
+- Added background rendering using LCDC tile data and tile map selection.
+- Applied the BGP register to map 2-bit colour indices to four `u32` greyscale shades.
+- Added SCX/SCY scrolling support.
+
+### Tests
+
+- `cargo fmt`
+- `cargo test`
+- `cargo clippy --all-targets --all-features`
+- Added PPU unit tests for tile decoding, tile-map rendering, palette mapping, and scroll offsets.
+
+### Decisions
+
+- Kept the framebuffer as `[u32; 160 * 144]`, matching the architecture guidance and keeping the frontend boundary simple.
+- Used fixed DMG shade values in ARGB-like `u32` form for now.
+- Added no dependencies.
+
+### Notes
+
+- Rendering currently covers the background layer only; the window and sprites remain future milestones.
+
+## 0021: Add PPU skeleton
+
+Date: 2026-06-10
+
+Status: Complete
+
+### Goal
+
+Implement roadmap Stage 14 by adding a PPU component with VRAM, OAM, and LCD register routing through the bus.
+
+### Changes
+
+- Added `gb_core::ppu::Ppu` with 8 KiB VRAM, 160 bytes of OAM, LCD registers, and a framebuffer.
+- Routed `0x8000..=0x9FFF` VRAM, `0xFE00..=0xFE9F` OAM, unusable OAM reads, and `0xFF40..=0xFF4B` LCD registers through `Bus`.
+- Made `LY` read-only to CPU writes for now.
+
+### Tests
+
+- `cargo fmt`
+- `cargo test`
+- `cargo clippy --all-targets --all-features`
+- Added PPU unit tests and bus integration tests for VRAM, OAM, unusable OAM, and LCD register routing.
+
+### Decisions
+
+- Kept PPU-owned fixed hardware storage as arrays.
+- Stored LCDC in a small wrapper and used a `PpuMode` enum internally.
+- Added no dependencies.
+
+### Notes
+
+- LCD register behavior is intentionally basic; detailed STAT interrupt behavior and access restrictions are deferred.
+
 ## 0020: Start external CPU ROM testing
 
 Date: 2026-06-10

@@ -8,6 +8,7 @@ use crate::{
     cartridge::Cartridge,
     cpu::TCycles,
     interrupt::{Interrupt, InterruptFlags},
+    ppu::{Ppu, FRAMEBUFFER_PIXELS},
     serial::Serial,
     timer::Timer,
 };
@@ -26,11 +27,20 @@ const SERIAL_START: u16 = 0xFF01;
 const SERIAL_END: u16 = 0xFF02;
 const TIMER_START: u16 = 0xFF04;
 const TIMER_END: u16 = 0xFF07;
+const VRAM_START: u16 = 0x8000;
+const VRAM_END: u16 = 0x9FFF;
+const OAM_START: u16 = 0xFE00;
+const OAM_END: u16 = 0xFE9F;
+const UNUSABLE_OAM_START: u16 = 0xFEA0;
+const UNUSABLE_OAM_END: u16 = 0xFEFF;
+const PPU_REGISTER_START: u16 = 0xFF40;
+const PPU_REGISTER_END: u16 = 0xFF4B;
 
 /// CPU-facing memory bus.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Bus {
     cartridge: Cartridge,
+    ppu: Ppu,
     serial: Serial,
     timer: Timer,
     wram: [u8; WRAM_SIZE],
@@ -45,6 +55,7 @@ impl Bus {
     pub fn new(cartridge: Cartridge) -> Self {
         Self {
             cartridge,
+            ppu: Ppu::new(),
             serial: Serial::new(),
             timer: Timer::new(),
             wram: [0; WRAM_SIZE],
@@ -61,10 +72,14 @@ impl Bus {
     pub fn read8(&self, address: u16) -> u8 {
         match address {
             0x0000..=0x7FFF => self.cartridge.read_rom(address).unwrap_or(0xFF),
+            VRAM_START..=VRAM_END => self.ppu.read_vram(address - VRAM_START),
             WRAM_START..=WRAM_END => self.wram[wram_index(address)],
+            OAM_START..=OAM_END => self.ppu.read_oam(address - OAM_START),
+            UNUSABLE_OAM_START..=UNUSABLE_OAM_END => 0xFF,
             SERIAL_START..=SERIAL_END => self.serial.read(address),
             TIMER_START..=TIMER_END => self.timer.read(address),
             INTERRUPT_FLAGS_ADDR => self.interrupt_flags.read_if(),
+            PPU_REGISTER_START..=PPU_REGISTER_END => self.ppu.read_register(address),
             HRAM_START..=HRAM_END => self.hram[hram_index(address)],
             INTERRUPT_ENABLE_ADDR => self.interrupt_enable.raw(),
             _ => 0xFF,
@@ -77,10 +92,14 @@ impl Bus {
     pub fn write8(&mut self, address: u16, value: u8) {
         match address {
             0x0000..=0x7FFF => self.cartridge.write_rom(address, value),
+            VRAM_START..=VRAM_END => self.ppu.write_vram(address - VRAM_START, value),
             WRAM_START..=WRAM_END => self.wram[wram_index(address)] = value,
+            OAM_START..=OAM_END => self.ppu.write_oam(address - OAM_START, value),
+            UNUSABLE_OAM_START..=UNUSABLE_OAM_END => {}
             SERIAL_START..=SERIAL_END => self.serial.write(address, value),
             TIMER_START..=TIMER_END => self.timer.write(address, value),
             INTERRUPT_FLAGS_ADDR => self.interrupt_flags.write_if(value),
+            PPU_REGISTER_START..=PPU_REGISTER_END => self.ppu.write_register(address, value),
             HRAM_START..=HRAM_END => self.hram[hram_index(address)] = value,
             INTERRUPT_ENABLE_ADDR => self.interrupt_enable.set_raw(value),
             _ => {}
@@ -107,6 +126,21 @@ impl Bus {
     /// Advances bus-owned hardware components by the given T-cycles.
     pub fn tick(&mut self, cycles: TCycles) {
         self.timer.tick(cycles, &mut self.interrupt_flags);
+        self.ppu.tick(cycles, &mut self.interrupt_flags);
+    }
+
+    #[must_use]
+    pub fn framebuffer(&self) -> &[u32; FRAMEBUFFER_PIXELS] {
+        self.ppu.framebuffer()
+    }
+
+    #[must_use]
+    pub fn frame_ready(&self) -> bool {
+        self.ppu.frame_ready()
+    }
+
+    pub fn take_frame_ready(&mut self) -> bool {
+        self.ppu.take_frame_ready()
     }
 
     /// Returns collected serial debug output without draining it.

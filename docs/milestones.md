@@ -1,5 +1,43 @@
 # Milestones
 
+## 0020: Start external CPU ROM testing
+
+Date: 2026-06-10
+
+Status: Complete
+
+### Goal
+
+Run Blargg's external `cpu_instrs` ROM through the headless serial runner and fix the CPU/cartridge gaps needed for it to pass.
+
+### Changes
+
+- Decoded cartridge type `0x01` as `MBC1` instead of a generic unsupported type.
+- Added minimal MBC1 ROM bank switching for the lower 5-bit ROM bank register.
+- Added missing CPU opcodes found by the test ROMs: HL auto-increment/decrement loads, stack `PUSH`/`POP`, ALU `(HL)` operands, `INC/DEC (HL)`, `LD (a16),SP`, `RETI`, and `LD A,(C)`/`LD (C),A`.
+- Ran Blargg's individual `04-op r,imm.gb` and combined `cpu_instrs.gb` ROMs through the existing serial step runner.
+
+### Tests
+
+- `cargo fmt`
+- `cargo test`
+- `cargo clippy --all-targets --all-features`
+- `cargo run -p gb-desktop --quiet -- "test-roms\blargg\cpu_instrs\individual\04-op r,imm.gb" --serial-steps 10000000`
+- `cargo run -p gb-desktop --quiet -- test-roms\blargg\cpu_instrs\cpu_instrs.gb --serial-steps 120000000`
+- Added unit tests for each added CPU instruction group.
+- Added cartridge and bus tests for MBC1 ROM bank selection.
+
+### Decisions
+
+- MBC1 support remains intentionally minimal: enough ROM banking for external CPU tests, without RAM banking or mode support yet.
+- Kept using the existing bounded serial step runner for the first external ROM attempt.
+- Added no dependencies.
+
+### Notes
+
+- Blargg `cpu_instrs.gb` printed `Passed all tests`.
+- A future runner improvement could stop automatically when serial output contains `Passed` or `Failed` instead of relying on a large step count.
+
 ## 0019: Implement serial debug output
 
 Date: 2026-06-10

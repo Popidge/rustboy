@@ -9,12 +9,14 @@ pub use header::{CartridgeHeader, CartridgeType, RamSize, RomSize};
 use std::{error::Error, fmt};
 
 const ROM_ADDRESS_END: u16 = 0x7FFF;
+const ROM_BANK_SIZE: usize = 0x4000;
 
 /// A loaded Game Boy cartridge ROM.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Cartridge {
     rom: Vec<u8>,
     header: CartridgeHeader,
+    selected_rom_bank: u8,
 }
 
 /// Errors that can occur while loading cartridge bytes.
@@ -67,7 +69,11 @@ impl Cartridge {
 
         let header = CartridgeHeader::from_rom(&bytes)?;
 
-        Ok(Self { rom: bytes, header })
+        Ok(Self {
+            rom: bytes,
+            header,
+            selected_rom_bank: 1,
+        })
     }
 
     /// Returns the number of ROM bytes stored by this cartridge.
@@ -118,10 +124,32 @@ impl Cartridge {
             return Err(CartridgeReadError::AddressOutOfRange { address });
         }
 
+        let index = match (self.header.cartridge_type(), address) {
+            (CartridgeType::Mbc1, 0x4000..=0x7FFF) => {
+                usize::from(self.selected_rom_bank) * ROM_BANK_SIZE + usize::from(address - 0x4000)
+            }
+            _ => usize::from(address),
+        };
+
         self.rom
-            .get(usize::from(address))
+            .get(index)
             .copied()
             .ok_or(CartridgeReadError::MissingRomByte { address })
+    }
+
+    /// Handles writes to cartridge control registers.
+    ///
+    /// ROM-only cartridges ignore these writes. MBC1 support is intentionally
+    /// minimal for now: only the lower five ROM bank bits are handled.
+    pub fn write_rom(&mut self, address: u16, value: u8) {
+        if self.header.cartridge_type() != CartridgeType::Mbc1 {
+            return;
+        }
+
+        if let 0x2000..=0x3FFF = address {
+            let bank = value & 0x1F;
+            self.selected_rom_bank = if bank == 0 { 1 } else { bank };
+        }
     }
 }
 
@@ -163,7 +191,10 @@ impl Error for CartridgeReadError {}
 
 #[cfg(test)]
 mod tests {
-    use super::{header::calculate_header_checksum, Cartridge, CartridgeError, CartridgeReadError};
+    use super::{
+        header::calculate_header_checksum, Cartridge, CartridgeError, CartridgeReadError,
+        ROM_BANK_SIZE,
+    };
 
     const ROM_SIZE: usize = 32 * 1024;
     const TITLE_START: usize = 0x0134;
@@ -197,6 +228,18 @@ mod tests {
     fn fake_rom_with_entry_byte(address: usize, value: u8) -> Vec<u8> {
         let mut rom = fake_rom_with_title(b"READTEST");
         rom[address] = value;
+        rom
+    }
+
+    fn fake_mbc1_rom_with_banks() -> Vec<u8> {
+        let mut rom = fake_rom(b"MBC1BANK", 0x01, 0x01, 0x00);
+        rom.resize(4 * ROM_BANK_SIZE, 0);
+        rom[0x0150] = 0x11;
+        rom[ROM_BANK_SIZE] = 0x33;
+        rom[2 * ROM_BANK_SIZE] = 0x44;
+        rom[3 * ROM_BANK_SIZE] = 0x55;
+        rom[HEADER_CHECKSUM_ADDR] =
+            calculate_header_checksum(&rom).expect("fake ROM should contain full header");
         rom
     }
 
@@ -310,14 +353,84 @@ mod tests {
 
     #[test]
     fn from_bytes_represents_unsupported_cartridge_type() {
-        let rom = fake_rom(b"MBC1GAME", 0x01, 0x00, 0x00);
+        let rom = fake_rom(b"ODDTYPE", 0xFC, 0x00, 0x00);
 
         let cartridge = Cartridge::from_bytes(rom).expect("unsupported type should still parse");
 
         assert_eq!(
             cartridge.cartridge_type().to_string(),
-            "Unsupported (0x01)",
-            "non-ROM-only cartridge types should be represented clearly"
+            "Unsupported (0xFC)",
+            "unrecognized cartridge type codes should be represented clearly"
+        );
+    }
+
+    #[test]
+    fn from_bytes_decodes_mbc1_header_for_external_test_roms() {
+        let rom = fake_rom(b"MBC1TEST", 0x01, 0x00, 0x00);
+
+        let cartridge = Cartridge::from_bytes(rom).expect("MBC1 header should parse");
+
+        assert_eq!(
+            cartridge.cartridge_type().to_string(),
+            "MBC1",
+            "cartridge type code 0x01 should decode as MBC1"
+        );
+    }
+
+    #[test]
+    fn read_rom_tolerates_32_kib_mbc1_roms_without_banking() {
+        let mut rom = fake_rom(b"MBC1TEST", 0x01, 0x00, 0x00);
+        rom[0x4000] = 0x99;
+        let cartridge = Cartridge::from_bytes(rom).expect("MBC1 header should parse");
+
+        let byte = cartridge
+            .read_rom(0x4000)
+            .expect("0x4000 should be readable from a 32 KiB MBC1-labelled ROM");
+
+        assert_eq!(
+            byte, 0x99,
+            "32 KiB MBC1-labelled test ROMs should read like fixed ROM until MBC1 banking exists"
+        );
+    }
+
+    #[test]
+    fn mbc1_reads_selected_rom_bank_in_switchable_region() {
+        let rom = fake_mbc1_rom_with_banks();
+        let mut cartridge = Cartridge::from_bytes(rom).expect("MBC1 header should parse");
+
+        assert_eq!(
+            cartridge.read_rom(0x0150),
+            Ok(0x11),
+            "bank 0 region should always read from bank 0"
+        );
+        assert_eq!(
+            cartridge.read_rom(0x4000),
+            Ok(0x33),
+            "switchable region should default to bank 1"
+        );
+
+        cartridge.write_rom(0x2000, 0x00);
+
+        assert_eq!(
+            cartridge.read_rom(0x4000),
+            Ok(0x33),
+            "MBC1 bank select value 0 should map to bank 1"
+        );
+
+        cartridge.write_rom(0x2000, 0x02);
+
+        assert_eq!(
+            cartridge.read_rom(0x4000),
+            Ok(0x44),
+            "switchable region should read from the selected ROM bank"
+        );
+
+        cartridge.write_rom(0x2000, 0x03);
+
+        assert_eq!(
+            cartridge.read_rom(0x4000),
+            Ok(0x55),
+            "MBC1 should support selecting another available lower-bit ROM bank"
         );
     }
 

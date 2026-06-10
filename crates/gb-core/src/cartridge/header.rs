@@ -109,6 +109,7 @@ pub(crate) fn calculate_header_checksum(rom: &[u8]) -> Result<u8, CartridgeError
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CartridgeType {
     RomOnly,
+    Mbc1,
     Unsupported(u8),
 }
 
@@ -117,6 +118,7 @@ impl CartridgeType {
     fn from_code(code: u8) -> Self {
         match code {
             0x00 => Self::RomOnly,
+            0x01 => Self::Mbc1,
             unsupported => Self::Unsupported(unsupported),
         }
     }
@@ -126,6 +128,7 @@ impl fmt::Display for CartridgeType {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::RomOnly => formatter.write_str("ROM ONLY"),
+            Self::Mbc1 => formatter.write_str("MBC1"),
             Self::Unsupported(code) => write!(formatter, "Unsupported (0x{code:02X})"),
         }
     }

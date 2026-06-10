@@ -10,6 +10,7 @@ const RAM_SIZE_ADDR: usize = 0x0149;
 const HEADER_CHECKSUM_START: usize = 0x0134;
 const HEADER_CHECKSUM_END_INCLUSIVE: usize = 0x014C;
 const HEADER_CHECKSUM_ADDR: usize = 0x014D;
+const ROM_BANK_SIZE: usize = 0x4000;
 
 fn test_bus_with_rom_byte(address: usize, value: u8) -> Bus {
     let mut rom = minimal_rom_with_entry_point(&[]);
@@ -21,6 +22,22 @@ fn test_bus_with_rom_byte(address: usize, value: u8) -> Bus {
     rom[HEADER_CHECKSUM_ADDR] = calculate_header_checksum(&rom);
 
     let cartridge = Cartridge::from_bytes(rom).expect("test ROM should parse");
+    Bus::new(cartridge)
+}
+
+fn test_bus_with_mbc1_banks() -> Bus {
+    let mut rom = minimal_rom_with_entry_point(&[]);
+    rom.resize(4 * ROM_BANK_SIZE, 0);
+    rom[TITLE_START..TITLE_START + 7].copy_from_slice(b"BANKBUS");
+    rom[CARTRIDGE_TYPE_ADDR] = 0x01;
+    rom[ROM_SIZE_ADDR] = 0x01;
+    rom[RAM_SIZE_ADDR] = 0x00;
+    rom[ROM_BANK_SIZE] = 0x11;
+    rom[2 * ROM_BANK_SIZE] = 0x22;
+    rom[3 * ROM_BANK_SIZE] = 0x33;
+    rom[HEADER_CHECKSUM_ADDR] = calculate_header_checksum(&rom);
+
+    let cartridge = Cartridge::from_bytes(rom).expect("MBC1 test ROM should parse");
     Bus::new(cartridge)
 }
 
@@ -187,6 +204,29 @@ fn write8_ignores_rom_for_rom_only_cartridge() {
         bus.read8(0x0100),
         0x42,
         "writes to ROM should not alter ROM-only cartridge data"
+    );
+}
+
+#[test]
+fn write8_routes_mbc1_rom_bank_select() {
+    let mut bus = test_bus_with_mbc1_banks();
+
+    assert_eq!(bus.read8(0x4000), 0x11, "MBC1 should default to ROM bank 1");
+
+    bus.write8(0x2000, 0x02);
+
+    assert_eq!(
+        bus.read8(0x4000),
+        0x22,
+        "MBC1 bank-select writes should affect switchable ROM reads"
+    );
+
+    bus.write8(0x2000, 0x00);
+
+    assert_eq!(
+        bus.read8(0x4000),
+        0x11,
+        "MBC1 bank 0 selection should map back to bank 1"
     );
 }
 

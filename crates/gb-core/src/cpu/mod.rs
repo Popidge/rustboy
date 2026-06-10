@@ -162,6 +162,7 @@ impl Cpu {
             0x05 => Ok(self.dec_r(Register8::B)),
             0x06 => Ok(self.ld_r_d8(Register8::B, bus)),
             0x07 => Ok(self.rlca()),
+            0x08 => Ok(self.ld_addr_a16_sp(bus)),
             0x09 => Ok(self.add_hl_rr(RegisterPair::BC)),
             0x0A => Ok(self.ld_a_addr_rr(RegisterPair::BC, bus)),
             0x0B => Ok(self.dec_rr(RegisterPair::BC)),
@@ -187,6 +188,7 @@ impl Cpu {
             0x18 => Ok(self.jr_e8(bus)),
             0x20 => Ok(self.jr_cc_e8(Condition::NotZero, bus)),
             0x21 => Ok(self.ld_rr_d16(RegisterPair::HL, bus)),
+            0x22 => Ok(self.ld_addr_hl_inc_a(bus)),
             0x23 => Ok(self.inc_rr(RegisterPair::HL)),
             0x24 => Ok(self.inc_r(Register8::H)),
             0x25 => Ok(self.dec_r(Register8::H)),
@@ -194,6 +196,7 @@ impl Cpu {
             0x27 => Ok(self.daa()),
             0x28 => Ok(self.jr_cc_e8(Condition::Zero, bus)),
             0x29 => Ok(self.add_hl_rr(RegisterPair::HL)),
+            0x2A => Ok(self.ld_a_addr_hl_inc(bus)),
             0x2B => Ok(self.dec_rr(RegisterPair::HL)),
             0x2C => Ok(self.inc_r(Register8::L)),
             0x2D => Ok(self.dec_r(Register8::L)),
@@ -201,11 +204,15 @@ impl Cpu {
             0x2F => Ok(self.cpl()),
             0x30 => Ok(self.jr_cc_e8(Condition::NotCarry, bus)),
             0x31 => Ok(self.ld_rr_d16(RegisterPair::SP, bus)),
+            0x32 => Ok(self.ld_addr_hl_dec_a(bus)),
             0x33 => Ok(self.inc_rr(RegisterPair::SP)),
+            0x34 => Ok(self.inc_addr_hl(bus)),
+            0x35 => Ok(self.dec_addr_hl(bus)),
             0x36 => Ok(self.ld_addr_hl_d8(bus)),
             0x37 => Ok(self.scf()),
             0x38 => Ok(self.jr_cc_e8(Condition::Carry, bus)),
             0x39 => Ok(self.add_hl_rr(RegisterPair::SP)),
+            0x3A => Ok(self.ld_a_addr_hl_dec(bus)),
             0x3B => Ok(self.dec_rr(RegisterPair::SP)),
             0x3C => Ok(self.inc_r(Register8::A)),
             0x3D => Ok(self.dec_r(Register8::A)),
@@ -281,6 +288,7 @@ impl Cpu {
             0x83 => Ok(self.add_a_r(Register8::E)),
             0x84 => Ok(self.add_a_r(Register8::H)),
             0x85 => Ok(self.add_a_r(Register8::L)),
+            0x86 => Ok(self.add_a_addr_hl(bus)),
             0x87 => Ok(self.add_a_r(Register8::A)),
             0x88 => Ok(self.adc_a_r(Register8::B)),
             0x89 => Ok(self.adc_a_r(Register8::C)),
@@ -288,6 +296,7 @@ impl Cpu {
             0x8B => Ok(self.adc_a_r(Register8::E)),
             0x8C => Ok(self.adc_a_r(Register8::H)),
             0x8D => Ok(self.adc_a_r(Register8::L)),
+            0x8E => Ok(self.adc_a_addr_hl(bus)),
             0x8F => Ok(self.adc_a_r(Register8::A)),
             0x90 => Ok(self.sub_a_r(Register8::B)),
             0x91 => Ok(self.sub_a_r(Register8::C)),
@@ -295,6 +304,7 @@ impl Cpu {
             0x93 => Ok(self.sub_a_r(Register8::E)),
             0x94 => Ok(self.sub_a_r(Register8::H)),
             0x95 => Ok(self.sub_a_r(Register8::L)),
+            0x96 => Ok(self.sub_a_addr_hl(bus)),
             0x97 => Ok(self.sub_a_r(Register8::A)),
             0x98 => Ok(self.sbc_a_r(Register8::B)),
             0x99 => Ok(self.sbc_a_r(Register8::C)),
@@ -302,6 +312,7 @@ impl Cpu {
             0x9B => Ok(self.sbc_a_r(Register8::E)),
             0x9C => Ok(self.sbc_a_r(Register8::H)),
             0x9D => Ok(self.sbc_a_r(Register8::L)),
+            0x9E => Ok(self.sbc_a_addr_hl(bus)),
             0x9F => Ok(self.sbc_a_r(Register8::A)),
             0xA0 => Ok(self.and_a_r(Register8::B)),
             0xA1 => Ok(self.and_a_r(Register8::C)),
@@ -309,6 +320,7 @@ impl Cpu {
             0xA3 => Ok(self.and_a_r(Register8::E)),
             0xA4 => Ok(self.and_a_r(Register8::H)),
             0xA5 => Ok(self.and_a_r(Register8::L)),
+            0xA6 => Ok(self.and_a_addr_hl(bus)),
             0xA7 => Ok(self.and_a_r(Register8::A)),
             0xA8 => Ok(self.xor_a_r(Register8::B)),
             0xA9 => Ok(self.xor_a_r(Register8::C)),
@@ -316,6 +328,7 @@ impl Cpu {
             0xAB => Ok(self.xor_a_r(Register8::E)),
             0xAC => Ok(self.xor_a_r(Register8::H)),
             0xAD => Ok(self.xor_a_r(Register8::L)),
+            0xAE => Ok(self.xor_a_addr_hl(bus)),
             0xAF => Ok(self.xor_a_r(Register8::A)),
             0xB0 => Ok(self.or_a_r(Register8::B)),
             0xB1 => Ok(self.or_a_r(Register8::C)),
@@ -323,6 +336,7 @@ impl Cpu {
             0xB3 => Ok(self.or_a_r(Register8::E)),
             0xB4 => Ok(self.or_a_r(Register8::H)),
             0xB5 => Ok(self.or_a_r(Register8::L)),
+            0xB6 => Ok(self.or_a_addr_hl(bus)),
             0xB7 => Ok(self.or_a_r(Register8::A)),
             0xB8 => Ok(self.cp_a_r(Register8::B)),
             0xB9 => Ok(self.cp_a_r(Register8::C)),
@@ -330,12 +344,15 @@ impl Cpu {
             0xBB => Ok(self.cp_a_r(Register8::E)),
             0xBC => Ok(self.cp_a_r(Register8::H)),
             0xBD => Ok(self.cp_a_r(Register8::L)),
+            0xBE => Ok(self.cp_a_addr_hl(bus)),
             0xBF => Ok(self.cp_a_r(Register8::A)),
             0xCB => Ok(self.step_cb(bus)),
             0xC0 => Ok(self.ret_cc(Condition::NotZero, bus)),
+            0xC1 => Ok(self.pop_rr(StackRegisterPair::BC, bus)),
             0xC2 => Ok(self.jp_cc_a16(Condition::NotZero, bus)),
             0xC3 => Ok(self.jp_a16(bus)),
             0xC4 => Ok(self.call_cc_a16(Condition::NotZero, bus)),
+            0xC5 => Ok(self.push_rr(StackRegisterPair::BC, bus)),
             0xC6 => Ok(self.add_a_d8(bus)),
             0xC7 => Ok(self.rst(0x00, bus)),
             0xC8 => Ok(self.ret_cc(Condition::Zero, bus)),
@@ -346,16 +363,22 @@ impl Cpu {
             0xCE => Ok(self.adc_a_d8(bus)),
             0xCF => Ok(self.rst(0x08, bus)),
             0xD0 => Ok(self.ret_cc(Condition::NotCarry, bus)),
+            0xD1 => Ok(self.pop_rr(StackRegisterPair::DE, bus)),
             0xD2 => Ok(self.jp_cc_a16(Condition::NotCarry, bus)),
             0xD4 => Ok(self.call_cc_a16(Condition::NotCarry, bus)),
+            0xD5 => Ok(self.push_rr(StackRegisterPair::DE, bus)),
             0xD6 => Ok(self.sub_a_d8(bus)),
             0xD7 => Ok(self.rst(0x10, bus)),
             0xD8 => Ok(self.ret_cc(Condition::Carry, bus)),
+            0xD9 => Ok(self.reti(bus)),
             0xDA => Ok(self.jp_cc_a16(Condition::Carry, bus)),
             0xDC => Ok(self.call_cc_a16(Condition::Carry, bus)),
             0xDE => Ok(self.sbc_a_d8(bus)),
             0xDF => Ok(self.rst(0x18, bus)),
             0xE0 => Ok(self.ldh_addr_a8_a(bus)),
+            0xE1 => Ok(self.pop_rr(StackRegisterPair::HL, bus)),
+            0xE2 => Ok(self.ldh_addr_c_a(bus)),
+            0xE5 => Ok(self.push_rr(StackRegisterPair::HL, bus)),
             0xE6 => Ok(self.and_a_d8(bus)),
             0xE7 => Ok(self.rst(0x20, bus)),
             0xE8 => Ok(self.add_sp_e8(bus)),
@@ -364,7 +387,10 @@ impl Cpu {
             0xEE => Ok(self.xor_a_d8(bus)),
             0xEF => Ok(self.rst(0x28, bus)),
             0xF0 => Ok(self.ldh_a_addr_a8(bus)),
+            0xF1 => Ok(self.pop_rr(StackRegisterPair::AF, bus)),
+            0xF2 => Ok(self.ldh_a_addr_c(bus)),
             0xF3 => Ok(self.di()),
+            0xF5 => Ok(self.push_rr(StackRegisterPair::AF, bus)),
             0xF6 => Ok(self.or_a_d8(bus)),
             0xF7 => Ok(self.rst(0x30, bus)),
             0xF8 => Ok(self.ld_hl_sp_e8(bus)),
@@ -713,6 +739,38 @@ impl Cpu {
         TCycles(8)
     }
 
+    fn ld_a_addr_hl_inc(&mut self, bus: &Bus) -> TCycles {
+        let address = self.registers.hl();
+        self.registers.a = bus.read8(address);
+        self.registers.set_hl(address.wrapping_add(1));
+
+        TCycles(8)
+    }
+
+    fn ld_a_addr_hl_dec(&mut self, bus: &Bus) -> TCycles {
+        let address = self.registers.hl();
+        self.registers.a = bus.read8(address);
+        self.registers.set_hl(address.wrapping_sub(1));
+
+        TCycles(8)
+    }
+
+    fn ld_addr_hl_inc_a(&mut self, bus: &mut Bus) -> TCycles {
+        let address = self.registers.hl();
+        bus.write8(address, self.registers.a);
+        self.registers.set_hl(address.wrapping_add(1));
+
+        TCycles(8)
+    }
+
+    fn ld_addr_hl_dec_a(&mut self, bus: &mut Bus) -> TCycles {
+        let address = self.registers.hl();
+        bus.write8(address, self.registers.a);
+        self.registers.set_hl(address.wrapping_sub(1));
+
+        TCycles(8)
+    }
+
     fn ld_addr_hl_d8(&mut self, bus: &mut Bus) -> TCycles {
         let value = self.fetch8(bus);
         bus.write8(self.registers.hl(), value);
@@ -746,6 +804,18 @@ impl Cpu {
         TCycles(12)
     }
 
+    fn ldh_a_addr_c(&mut self, bus: &Bus) -> TCycles {
+        self.registers.a = bus.read8(0xFF00 + u16::from(self.registers.c));
+
+        TCycles(8)
+    }
+
+    fn ldh_addr_c_a(&mut self, bus: &mut Bus) -> TCycles {
+        bus.write8(0xFF00 + u16::from(self.registers.c), self.registers.a);
+
+        TCycles(8)
+    }
+
     fn ld_a_addr_a16(&mut self, bus: &Bus) -> TCycles {
         let address = self.fetch16(bus);
         self.registers.a = bus.read8(address);
@@ -758,6 +828,13 @@ impl Cpu {
         bus.write8(address, self.registers.a);
 
         TCycles(16)
+    }
+
+    fn ld_addr_a16_sp(&mut self, bus: &mut Bus) -> TCycles {
+        let address = self.fetch16(bus);
+        bus.write16(address, self.registers.sp);
+
+        TCycles(20)
     }
 
     fn ld_rr_d16(&mut self, pair: RegisterPair, bus: &Bus) -> TCycles {
@@ -811,6 +888,34 @@ impl Cpu {
         TCycles(4)
     }
 
+    fn inc_addr_hl(&mut self, bus: &mut Bus) -> TCycles {
+        let address = self.registers.hl();
+        let value = bus.read8(address);
+        let result = value.wrapping_add(1);
+
+        bus.write8(address, result);
+        self.registers.f.set_zero(result == 0);
+        self.registers.f.set_subtract(false);
+        self.registers
+            .f
+            .set_half_carry((value & 0x0F).wrapping_add(1) > 0x0F);
+
+        TCycles(12)
+    }
+
+    fn dec_addr_hl(&mut self, bus: &mut Bus) -> TCycles {
+        let address = self.registers.hl();
+        let value = bus.read8(address);
+        let result = value.wrapping_sub(1);
+
+        bus.write8(address, result);
+        self.registers.f.set_zero(result == 0);
+        self.registers.f.set_subtract(true);
+        self.registers.f.set_half_carry(value.trailing_zeros() >= 4);
+
+        TCycles(12)
+    }
+
     fn add_a_r(&mut self, register: Register8) -> TCycles {
         self.alu_add(self.read_register8(register));
         TCycles(4)
@@ -849,6 +954,46 @@ impl Cpu {
     fn cp_a_r(&mut self, register: Register8) -> TCycles {
         self.alu_cp(self.read_register8(register));
         TCycles(4)
+    }
+
+    fn add_a_addr_hl(&mut self, bus: &Bus) -> TCycles {
+        self.alu_add(bus.read8(self.registers.hl()));
+        TCycles(8)
+    }
+
+    fn adc_a_addr_hl(&mut self, bus: &Bus) -> TCycles {
+        self.alu_adc(bus.read8(self.registers.hl()));
+        TCycles(8)
+    }
+
+    fn sub_a_addr_hl(&mut self, bus: &Bus) -> TCycles {
+        self.alu_sub(bus.read8(self.registers.hl()));
+        TCycles(8)
+    }
+
+    fn sbc_a_addr_hl(&mut self, bus: &Bus) -> TCycles {
+        self.alu_sbc(bus.read8(self.registers.hl()));
+        TCycles(8)
+    }
+
+    fn and_a_addr_hl(&mut self, bus: &Bus) -> TCycles {
+        self.alu_and(bus.read8(self.registers.hl()));
+        TCycles(8)
+    }
+
+    fn or_a_addr_hl(&mut self, bus: &Bus) -> TCycles {
+        self.alu_or(bus.read8(self.registers.hl()));
+        TCycles(8)
+    }
+
+    fn xor_a_addr_hl(&mut self, bus: &Bus) -> TCycles {
+        self.alu_xor(bus.read8(self.registers.hl()));
+        TCycles(8)
+    }
+
+    fn cp_a_addr_hl(&mut self, bus: &Bus) -> TCycles {
+        self.alu_cp(bus.read8(self.registers.hl()));
+        TCycles(8)
     }
 
     fn add_a_d8(&mut self, bus: &Bus) -> TCycles {
@@ -1197,6 +1342,13 @@ impl Cpu {
         TCycles(16)
     }
 
+    fn reti(&mut self, bus: &Bus) -> TCycles {
+        self.registers.pc = self.pop16(bus);
+        self.ime = true;
+
+        TCycles(16)
+    }
+
     fn ret_cc(&mut self, condition: Condition, bus: &Bus) -> TCycles {
         if self.condition_is_met(condition) {
             self.registers.pc = self.pop16(bus);
@@ -1211,6 +1363,37 @@ impl Cpu {
         self.registers.pc = vector;
 
         TCycles(16)
+    }
+
+    fn push_rr(&mut self, pair: StackRegisterPair, bus: &mut Bus) -> TCycles {
+        self.push16(bus, self.read_stack_register_pair(pair));
+
+        TCycles(16)
+    }
+
+    fn pop_rr(&mut self, pair: StackRegisterPair, bus: &Bus) -> TCycles {
+        let value = self.pop16(bus);
+        self.write_stack_register_pair(pair, value);
+
+        TCycles(12)
+    }
+
+    fn read_stack_register_pair(&self, pair: StackRegisterPair) -> u16 {
+        match pair {
+            StackRegisterPair::BC => self.registers.bc(),
+            StackRegisterPair::DE => self.registers.de(),
+            StackRegisterPair::HL => self.registers.hl(),
+            StackRegisterPair::AF => self.registers.af(),
+        }
+    }
+
+    fn write_stack_register_pair(&mut self, pair: StackRegisterPair, value: u16) {
+        match pair {
+            StackRegisterPair::BC => self.registers.set_bc(value),
+            StackRegisterPair::DE => self.registers.set_de(value),
+            StackRegisterPair::HL => self.registers.set_hl(value),
+            StackRegisterPair::AF => self.registers.set_af(value),
+        }
     }
 
     fn push16(&mut self, bus: &mut Bus, value: u16) {
@@ -1241,6 +1424,14 @@ enum RegisterPair {
     DE,
     HL,
     SP,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StackRegisterPair {
+    BC,
+    DE,
+    HL,
+    AF,
 }
 
 impl Default for Cpu {
@@ -1602,6 +1793,46 @@ mod tests {
     }
 
     #[test]
+    fn hl_auto_update_loads_read_or_write_a_and_update_hl() {
+        let cases = [
+            (0x22, 0xC100, 0xC101, 0x5A, 0x5A, "LD (HL+),A"),
+            (0x2A, 0xC101, 0xC102, 0xA5, 0x3C, "LD A,(HL+)"),
+            (0x32, 0xC102, 0xC101, 0x66, 0x66, "LD (HL-),A"),
+            (0x3A, 0xC101, 0xC100, 0x77, 0x2D, "LD A,(HL-)"),
+        ];
+
+        for (opcode, initial_hl, expected_hl, initial_a, memory_value, name) in cases {
+            let mut bus = bus_with_bytes(&[(0x0100, opcode)]);
+            bus.write8(initial_hl, memory_value);
+            let mut cpu = Cpu::new_dmg_post_boot();
+            cpu.registers.set_hl(initial_hl);
+            cpu.registers.a = initial_a;
+
+            let cycles = cpu.step(&mut bus);
+
+            assert_eq!(cycles, Ok(TCycles(8)), "{name} should take 8 T-cycles");
+            assert_eq!(
+                cpu.registers().hl(),
+                expected_hl,
+                "{name} should update HL after using the original address"
+            );
+            if opcode == 0x22 || opcode == 0x32 {
+                assert_eq!(
+                    bus.read8(initial_hl),
+                    initial_a,
+                    "{name} should write A to the original HL address"
+                );
+            } else {
+                assert_eq!(
+                    cpu.registers().a,
+                    memory_value,
+                    "{name} should load A from the original HL address"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn ld_addr_hl_d8_writes_immediate_to_memory_pointed_to_by_hl() {
         let mut bus = bus_with_bytes(&[(0x0100, 0x36), (0x0101, 0x3C)]);
         let mut cpu = Cpu::new_dmg_post_boot();
@@ -1780,6 +2011,25 @@ mod tests {
     }
 
     #[test]
+    fn ldh_a_addr_c_and_ldh_addr_c_a_use_c_as_high_memory_offset() {
+        let mut bus = bus_with_bytes(&[(0x0100, 0xE2), (0x0101, 0xF2)]);
+        let mut cpu = Cpu::new_dmg_post_boot();
+        cpu.registers.a = 0xA7;
+        cpu.registers.c = 0x80;
+
+        let cycles = cpu.step(&mut bus);
+
+        assert_eq!(cycles, Ok(TCycles(8)), "LD (C),A should take 8 T-cycles");
+        assert_eq!(bus.read8(0xFF80), 0xA7, "0xFF00 + C should receive A");
+
+        cpu.registers.a = 0x00;
+        let cycles = cpu.step(&mut bus);
+
+        assert_eq!(cycles, Ok(TCycles(8)), "LD A,(C) should take 8 T-cycles");
+        assert_eq!(cpu.registers().a, 0xA7, "A should read from 0xFF00 + C");
+    }
+
+    #[test]
     fn ld_a_addr_a16_reads_from_absolute_memory() {
         let mut bus = bus_with_bytes(&[(0x0100, 0xFA), (0x0101, 0x34), (0x0102, 0xC1)]);
         bus.write8(0xC134, 0x9E);
@@ -1818,6 +2068,36 @@ mod tests {
             "LD (a16),A should take 16 T-cycles"
         );
         assert_eq!(bus.read8(0xC578), 0x2B, "absolute address should receive A");
+    }
+
+    #[test]
+    fn ld_addr_a16_sp_writes_stack_pointer_little_endian() {
+        let mut bus = bus_with_bytes(&[(0x0100, 0x08), (0x0101, 0x34), (0x0102, 0xC1)]);
+        let mut cpu = Cpu::new_dmg_post_boot();
+        cpu.registers.sp = 0xBEEF;
+
+        let cycles = cpu.step(&mut bus);
+
+        assert_eq!(
+            cycles,
+            Ok(TCycles(20)),
+            "LD (a16),SP should take 20 T-cycles"
+        );
+        assert_eq!(
+            bus.read8(0xC134),
+            0xEF,
+            "low byte of SP should be stored first"
+        );
+        assert_eq!(
+            bus.read8(0xC135),
+            0xBE,
+            "high byte of SP should be stored second"
+        );
+        assert_eq!(
+            cpu.registers().pc,
+            0x0103,
+            "LD (a16),SP should consume three bytes"
+        );
     }
 
     #[test]
@@ -1877,6 +2157,30 @@ mod tests {
                 "opcode {opcode:02X} should decrement {register:?}"
             );
             assert_flags(&cpu, zero, true, half_carry, true);
+        }
+    }
+
+    #[test]
+    fn inc_and_dec_addr_hl_update_memory_and_flags_but_preserve_carry() {
+        let cases = [
+            (0x34, 0x0F, 0x10, false, false, true, "INC (HL) half carry"),
+            (0x34, 0xFF, 0x00, true, false, true, "INC (HL) zero"),
+            (0x35, 0x10, 0x0F, false, true, true, "DEC (HL) half carry"),
+            (0x35, 0x01, 0x00, true, true, false, "DEC (HL) zero"),
+        ];
+
+        for (opcode, initial, expected, zero, subtract, half_carry, name) in cases {
+            let mut bus = bus_with_bytes(&[(0x0100, opcode)]);
+            bus.write8(0xC300, initial);
+            let mut cpu = Cpu::new_dmg_post_boot();
+            cpu.registers.set_hl(0xC300);
+            cpu.registers.f.set_carry(true);
+
+            let cycles = cpu.step(&mut bus);
+
+            assert_eq!(cycles, Ok(TCycles(12)), "{name} should take 12 T-cycles");
+            assert_eq!(bus.read8(0xC300), expected, "{name} memory result");
+            assert_flags(&cpu, zero, subtract, half_carry, true);
         }
     }
 
@@ -2090,6 +2394,135 @@ mod tests {
         assert_eq!(cycles, Ok(TCycles(4)), "CP A,B should take 4 T-cycles");
         assert_eq!(cpu.registers().a, 0x10, "CP should not modify A");
         assert_flags(&cpu, false, true, true, true);
+    }
+
+    #[test]
+    fn alu_operations_can_read_operand_from_hl_memory() {
+        assert_alu_addr_hl_case((
+            0x86,
+            0x0F,
+            0x01,
+            false,
+            0x10,
+            false,
+            false,
+            true,
+            false,
+            "ADD A,(HL)",
+        ));
+        assert_alu_addr_hl_case((
+            0x8E,
+            0xFF,
+            0x00,
+            true,
+            0x00,
+            true,
+            false,
+            true,
+            true,
+            "ADC A,(HL)",
+        ));
+        assert_alu_addr_hl_case((
+            0x96,
+            0x10,
+            0x01,
+            false,
+            0x0F,
+            false,
+            true,
+            true,
+            false,
+            "SUB A,(HL)",
+        ));
+        assert_alu_addr_hl_case((
+            0x9E,
+            0x10,
+            0x0F,
+            true,
+            0x00,
+            true,
+            true,
+            true,
+            false,
+            "SBC A,(HL)",
+        ));
+        assert_alu_addr_hl_case((
+            0xA6,
+            0xF0,
+            0x0F,
+            false,
+            0x00,
+            true,
+            false,
+            true,
+            false,
+            "AND A,(HL)",
+        ));
+        assert_alu_addr_hl_case((
+            0xAE,
+            0xF0,
+            0x0F,
+            false,
+            0xFF,
+            false,
+            false,
+            false,
+            false,
+            "XOR A,(HL)",
+        ));
+        assert_alu_addr_hl_case((
+            0xB6,
+            0x80,
+            0x01,
+            false,
+            0x81,
+            false,
+            false,
+            false,
+            false,
+            "OR A,(HL)",
+        ));
+        assert_alu_addr_hl_case((
+            0xBE,
+            0x10,
+            0x01,
+            false,
+            0x10,
+            false,
+            true,
+            true,
+            false,
+            "CP A,(HL)",
+        ));
+    }
+
+    type AluAddrHlCase = (u8, u8, u8, bool, u8, bool, bool, bool, bool, &'static str);
+
+    fn assert_alu_addr_hl_case(case: AluAddrHlCase) {
+        let (
+            opcode,
+            a,
+            memory_value,
+            carry_in,
+            expected_a,
+            zero,
+            subtract,
+            half_carry,
+            carry,
+            name,
+        ) = case;
+        let mut bus = bus_with_bytes(&[(0x0100, opcode)]);
+        bus.write8(0xC200, memory_value);
+        let mut cpu = Cpu::new_dmg_post_boot();
+        cpu.registers.set_hl(0xC200);
+        cpu.registers.a = a;
+        cpu.registers.f.set_carry(carry_in);
+
+        let cycles = cpu.step(&mut bus);
+
+        assert_eq!(cycles, Ok(TCycles(8)), "{name} should take 8 T-cycles");
+        assert_eq!(cpu.registers().a, expected_a, "{name} result");
+        assert_flags(&cpu, zero, subtract, half_carry, carry);
     }
 
     #[test]
@@ -2519,6 +2952,89 @@ mod tests {
     }
 
     #[test]
+    fn push_rr_stores_register_pair_on_stack() {
+        let cases = [
+            (0xC5, 0x1234, "PUSH BC"),
+            (0xD5, 0x5678, "PUSH DE"),
+            (0xE5, 0x9ABC, "PUSH HL"),
+            (0xF5, 0xDEF0, "PUSH AF"),
+        ];
+
+        for (opcode, value, name) in cases {
+            let mut bus = bus_with_bytes(&[(0x0100, opcode)]);
+            let mut cpu = Cpu::new_dmg_post_boot();
+            cpu.registers.sp = 0xC100;
+            cpu.registers.set_bc(0);
+            cpu.registers.set_de(0);
+            cpu.registers.set_hl(0);
+            cpu.registers.set_af(0);
+            match opcode {
+                0xC5 => cpu.registers.set_bc(value),
+                0xD5 => cpu.registers.set_de(value),
+                0xE5 => cpu.registers.set_hl(value),
+                0xF5 => cpu.registers.set_af(value),
+                _ => unreachable!("test only uses PUSH opcodes"),
+            }
+
+            let cycles = cpu.step(&mut bus);
+
+            assert_eq!(cycles, Ok(TCycles(16)), "{name} should take 16 T-cycles");
+            assert_eq!(
+                cpu.registers().sp,
+                0xC0FE,
+                "{name} should decrement SP by two"
+            );
+            assert_eq!(
+                bus.read16(0xC0FE),
+                value,
+                "{name} should store the pair at SP"
+            );
+        }
+    }
+
+    #[test]
+    fn pop_rr_loads_register_pair_from_stack() {
+        let cases = [
+            (0xC1, 0x1234, 0x1234, "POP BC"),
+            (0xD1, 0x5678, 0x5678, "POP DE"),
+            (0xE1, 0x9ABC, 0x9ABC, "POP HL"),
+            (0xF1, 0xDEF7, 0xDEF0, "POP AF"),
+        ];
+
+        for (opcode, stack_value, expected_value, name) in cases {
+            let mut bus = bus_with_bytes(&[(0x0100, opcode)]);
+            bus.write16(0xC100, stack_value);
+            let mut cpu = Cpu::new_dmg_post_boot();
+            cpu.registers.sp = 0xC100;
+            cpu.registers.set_bc(0);
+            cpu.registers.set_de(0);
+            cpu.registers.set_hl(0);
+            cpu.registers.set_af(0);
+
+            let cycles = cpu.step(&mut bus);
+
+            let actual_value = match opcode {
+                0xC1 => cpu.registers().bc(),
+                0xD1 => cpu.registers().de(),
+                0xE1 => cpu.registers().hl(),
+                0xF1 => cpu.registers().af(),
+                _ => unreachable!("test only uses POP opcodes"),
+            };
+
+            assert_eq!(cycles, Ok(TCycles(12)), "{name} should take 12 T-cycles");
+            assert_eq!(
+                actual_value, expected_value,
+                "{name} should load the register pair"
+            );
+            assert_eq!(
+                cpu.registers().sp,
+                0xC102,
+                "{name} should increment SP by two"
+            );
+        }
+    }
+
+    #[test]
     fn call_pushes_return_address_and_ret_restores_it() {
         let mut bus = bus_with_bytes(&[(0x0100, 0xCD), (0x0101, 0x00), (0x0102, 0xC2)]);
         let mut cpu = Cpu::new_dmg_post_boot();
@@ -2545,6 +3061,22 @@ mod tests {
         assert_eq!(cycles, Ok(TCycles(16)), "RET should take 16 T-cycles");
         assert_eq!(cpu.registers().pc, 0x0103, "RET should restore pushed PC");
         assert_eq!(cpu.registers().sp, 0xC100, "RET should pop the stack");
+    }
+
+    #[test]
+    fn reti_pops_pc_and_enables_ime() {
+        let mut bus = bus_with_bytes(&[(0x0100, 0xD9)]);
+        bus.write16(0xC100, 0xC456);
+        let mut cpu = Cpu::new_dmg_post_boot();
+        cpu.registers.sp = 0xC100;
+        cpu.ime = false;
+
+        let cycles = cpu.step(&mut bus);
+
+        assert_eq!(cycles, Ok(TCycles(16)), "RETI should take 16 T-cycles");
+        assert_eq!(cpu.registers().pc, 0xC456, "RETI should pop PC from stack");
+        assert_eq!(cpu.registers().sp, 0xC102, "RETI should advance SP by two");
+        assert!(cpu.ime(), "RETI should enable IME immediately");
     }
 
     #[test]

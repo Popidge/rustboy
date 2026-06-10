@@ -76,7 +76,7 @@ impl Bus {
     /// Writes to ROM and unsupported regions are ignored for now.
     pub fn write8(&mut self, address: u16, value: u8) {
         match address {
-            0x0000..=0x7FFF => {}
+            0x0000..=0x7FFF => self.cartridge.write_rom(address, value),
             WRAM_START..=WRAM_END => self.wram[wram_index(address)] = value,
             SERIAL_START..=SERIAL_END => self.serial.write(address, value),
             TIMER_START..=TIMER_END => self.timer.write(address, value),

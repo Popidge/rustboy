@@ -1,5 +1,40 @@
 # Milestones
 
+## 0024: Add basic desktop display
+
+Date: 2026-06-10
+
+Status: Complete
+
+### Goal
+
+Implement roadmap Stage 17 by opening a scaled desktop window, displaying a framebuffer, and driving presentation from the emulator frame-ready loop.
+
+### Changes
+
+- Replaced the placeholder `GameBoy` with a top-level owner for `Cpu` and `Bus`.
+- Added `GameBoy::from_rom`, `step`, `run_until_frame`, framebuffer access, and serial output helpers.
+- Added a `pixels` + `winit` desktop window that displays the 160x144 framebuffer at 4x scale.
+- Preserved the existing `--serial-steps` runner and added `--demo` for a temporary animated checkerboard display.
+
+### Tests
+
+- `cargo fmt`
+- `cargo test`
+- `cargo clippy --all-targets --all-features`
+- Added core tests for `GameBoy` framebuffer exposure and step/tick integration.
+
+### Decisions
+
+- Added `pixels` and `winit` to `gb-desktop` only because Stage 17 explicitly needs a desktop display backend.
+- Kept `gb-core` free of frontend dependencies and exposed only emulator-facing framebuffer/frame-loop APIs.
+- Used the existing PPU frame-ready flag to pace emulator presentation.
+
+### Notes
+
+- ROM display exits if execution reaches an unimplemented opcode before the next frame.
+- The `--demo` mode gives a guaranteed visual smoke test while emulator compatibility is still early.
+
 ## 0023: Add PPU timing
 
 Date: 2026-06-10

@@ -3,6 +3,7 @@
 pub mod bus;
 pub mod cartridge;
 pub mod cpu;
+pub mod interrupt;
 
 /// Placeholder type for the emulator core.
 #[derive(Debug, Default)]

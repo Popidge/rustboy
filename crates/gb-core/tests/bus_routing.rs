@@ -1,7 +1,7 @@
 mod common;
 
 use common::minimal_rom_with_entry_point;
-use gb_core::{bus::Bus, cartridge::Cartridge};
+use gb_core::{bus::Bus, cartridge::Cartridge, interrupt::Interrupt};
 
 const TITLE_START: usize = 0x0134;
 const CARTRIDGE_TYPE_ADDR: usize = 0x0147;
@@ -80,12 +80,53 @@ fn write8_roundtrips_hram() {
 fn write8_roundtrips_interrupt_enable() {
     let mut bus = test_bus_with_rom_byte(0x0100, 0x42);
 
-    bus.write8(0xFFFF, 0x1F);
+    bus.write8(0xFFFF, 0xFF);
 
     assert_eq!(
         bus.read8(0xFFFF),
         0x1F,
-        "0xFFFF should read and write the interrupt enable register"
+        "0xFFFF should store only the five interrupt enable bits"
+    );
+}
+
+#[test]
+fn write8_roundtrips_interrupt_flags_with_if_upper_bits_set_on_read() {
+    let mut bus = test_bus_with_rom_byte(0x0100, 0x42);
+
+    bus.write8(0xFF0F, 0xFF);
+
+    assert_eq!(
+        bus.interrupt_flags(),
+        0x1F,
+        "IF storage should keep only the five interrupt request bits"
+    );
+    assert_eq!(
+        bus.read8(0xFF0F),
+        0xFF,
+        "IF reads should report unused upper bits as set"
+    );
+}
+
+#[test]
+fn typed_interrupt_helpers_request_clear_and_prioritize_pending_interrupts() {
+    let mut bus = test_bus_with_rom_byte(0x0100, 0x42);
+
+    bus.write8(0xFFFF, Interrupt::Timer.mask() | Interrupt::Joypad.mask());
+    bus.request_interrupt(Interrupt::Joypad);
+    bus.request_interrupt(Interrupt::Timer);
+
+    assert_eq!(
+        bus.pending_interrupt(),
+        Some(Interrupt::Timer),
+        "Timer should have priority over Joypad"
+    );
+
+    bus.clear_interrupt(Interrupt::Timer);
+
+    assert_eq!(
+        bus.pending_interrupt(),
+        Some(Interrupt::Joypad),
+        "Joypad should remain pending after Timer is cleared"
     );
 }
 
@@ -137,8 +178,8 @@ fn read16_and_write16_wrap_address_for_second_byte() {
 
     assert_eq!(
         bus.read8(0xFFFF),
-        0xCD,
-        "first byte at 0xFFFF should write interrupt enable"
+        0x0D,
+        "first byte at 0xFFFF should write masked interrupt enable bits"
     );
     assert_eq!(
         bus.read8(0x0000),
@@ -147,7 +188,7 @@ fn read16_and_write16_wrap_address_for_second_byte() {
     );
     assert_eq!(
         bus.read16(0xFFFF),
-        0x12CD,
+        0x120D,
         "read16 should use wrapping address arithmetic for the high byte"
     );
 }

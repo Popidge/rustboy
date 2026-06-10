@@ -4,7 +4,10 @@
 //! bus owns the cartridge plus WRAM/HRAM and interrupt registers; later
 //! milestones will add PPU, timer, serial, joypad, and APU routing.
 
-use crate::cartridge::Cartridge;
+use crate::{
+    cartridge::Cartridge,
+    interrupt::{Interrupt, InterruptFlags},
+};
 
 const WRAM_START: u16 = 0xC000;
 const WRAM_END: u16 = 0xDFFF;
@@ -15,6 +18,7 @@ const HRAM_END: u16 = 0xFFFE;
 const HRAM_SIZE: usize = 0x007F;
 
 const INTERRUPT_ENABLE_ADDR: u16 = 0xFFFF;
+const INTERRUPT_FLAGS_ADDR: u16 = 0xFF0F;
 
 /// CPU-facing memory bus.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -22,8 +26,8 @@ pub struct Bus {
     cartridge: Cartridge,
     wram: [u8; WRAM_SIZE],
     hram: [u8; HRAM_SIZE],
-    interrupt_enable: u8,
-    interrupt_flags: u8,
+    interrupt_enable: InterruptFlags,
+    interrupt_flags: InterruptFlags,
 }
 
 impl Bus {
@@ -34,8 +38,8 @@ impl Bus {
             cartridge,
             wram: [0; WRAM_SIZE],
             hram: [0; HRAM_SIZE],
-            interrupt_enable: 0,
-            interrupt_flags: 0,
+            interrupt_enable: InterruptFlags::default(),
+            interrupt_flags: InterruptFlags::default(),
         }
     }
 
@@ -47,8 +51,9 @@ impl Bus {
         match address {
             0x0000..=0x7FFF => self.cartridge.read_rom(address).unwrap_or(0xFF),
             WRAM_START..=WRAM_END => self.wram[wram_index(address)],
+            INTERRUPT_FLAGS_ADDR => self.interrupt_flags.read_if(),
             HRAM_START..=HRAM_END => self.hram[hram_index(address)],
-            INTERRUPT_ENABLE_ADDR => self.interrupt_enable,
+            INTERRUPT_ENABLE_ADDR => self.interrupt_enable.raw(),
             _ => 0xFF,
         }
     }
@@ -60,8 +65,9 @@ impl Bus {
         match address {
             0x0000..=0x7FFF => {}
             WRAM_START..=WRAM_END => self.wram[wram_index(address)] = value,
+            INTERRUPT_FLAGS_ADDR => self.interrupt_flags.write_if(value),
             HRAM_START..=HRAM_END => self.hram[hram_index(address)] = value,
-            INTERRUPT_ENABLE_ADDR => self.interrupt_enable = value,
+            INTERRUPT_ENABLE_ADDR => self.interrupt_enable.set_raw(value),
             _ => {}
         }
     }
@@ -84,11 +90,31 @@ impl Bus {
     }
 
     /// Returns the raw interrupt flags register storage.
-    ///
-    /// Stage 10 will route this through `0xFF0F` with typed interrupt helpers.
     #[must_use]
     pub fn interrupt_flags(&self) -> u8 {
-        self.interrupt_flags
+        self.interrupt_flags.raw()
+    }
+
+    /// Returns the raw interrupt enable register storage.
+    #[must_use]
+    pub fn interrupt_enable(&self) -> u8 {
+        self.interrupt_enable.raw()
+    }
+
+    /// Requests an interrupt in the IF register.
+    pub fn request_interrupt(&mut self, interrupt: Interrupt) {
+        self.interrupt_flags.request(interrupt);
+    }
+
+    /// Clears an interrupt request from the IF register.
+    pub fn clear_interrupt(&mut self, interrupt: Interrupt) {
+        self.interrupt_flags.clear(interrupt);
+    }
+
+    /// Returns the highest-priority interrupt that is both enabled and requested.
+    #[must_use]
+    pub fn pending_interrupt(&self) -> Option<Interrupt> {
+        InterruptFlags::first_pending(self.interrupt_enable, self.interrupt_flags)
     }
 }
 

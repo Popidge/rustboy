@@ -1,5 +1,40 @@
 # Milestones
 
+## 0017: Implement interrupts and CPU control
+
+Date: 2026-06-10
+
+Status: Complete
+
+### Goal
+
+Implement roadmap Stage 10 by routing interrupt registers, adding IME control, servicing interrupts, and modelling HALT/STOP control states.
+
+### Changes
+
+- Added typed `Interrupt` and `InterruptFlags` helpers with DMG priority order and vectors.
+- Routed `IF` at `0xFF0F` and masked `IE` at `0xFFFF` through the bus.
+- Added CPU `IME`, delayed `EI`, immediate `DI`, and interrupt servicing before opcode fetch.
+- Added `HALT` idling/wake behavior and a documented `STOP` placeholder state.
+
+### Tests
+
+- `cargo fmt`
+- `cargo test`
+- `cargo clippy --all-targets --all-features`
+- Added interrupt flag unit tests, bus routing tests for `IF`/`IE`, and CPU tests for `EI`/`DI`, servicing priority, HALT wake, and STOP placeholder behavior.
+
+### Decisions
+
+- Used a small `CpuRunState` enum for running, halted, and stopped states rather than separate booleans.
+- Implemented `EI` as delayed until after the following instruction.
+- Kept the HALT bug and detailed STOP behavior out of scope for this milestone.
+- Added no dependencies.
+
+### Notes
+
+- Timer and serial hardware can now request interrupts through typed bus helpers.
+
 ## 0016: Implement rotate, shift, and bit operations
 
 Date: 2026-06-10

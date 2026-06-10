@@ -37,6 +37,13 @@ enum Condition {
     Carry,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CpuRunState {
+    Running,
+    Halted,
+    Stopped,
+}
+
 /// CPU cycle count measured in Game Boy T-cycles.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct TCycles(pub u32);
@@ -67,6 +74,9 @@ impl std::error::Error for CpuError {}
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Cpu {
     registers: CpuRegisters,
+    ime: bool,
+    ime_enable_pending: bool,
+    run_state: CpuRunState,
 }
 
 impl Cpu {
@@ -78,6 +88,9 @@ impl Cpu {
     pub fn new_dmg_post_boot() -> Self {
         Self {
             registers: CpuRegisters::new_dmg_post_boot(),
+            ime: false,
+            ime_enable_pending: false,
+            run_state: CpuRunState::Running,
         }
     }
 
@@ -85,6 +98,24 @@ impl Cpu {
     #[must_use]
     pub fn registers(&self) -> &CpuRegisters {
         &self.registers
+    }
+
+    /// Returns whether interrupt master enable is currently set.
+    #[must_use]
+    pub fn ime(&self) -> bool {
+        self.ime
+    }
+
+    /// Returns whether the CPU is currently halted.
+    #[must_use]
+    pub fn halted(&self) -> bool {
+        self.run_state == CpuRunState::Halted
+    }
+
+    /// Returns whether the CPU has entered the placeholder STOP state.
+    #[must_use]
+    pub fn stopped(&self) -> bool {
+        self.run_state == CpuRunState::Stopped
     }
 
     /// Fetches one byte from the address at `PC`, then increments `PC`.
@@ -113,10 +144,16 @@ impl Cpu {
     /// implemented yet.
     #[allow(clippy::too_many_lines)]
     pub fn step(&mut self, bus: &mut Bus) -> Result<TCycles, CpuError> {
+        if let Some(cycles) = self.service_interrupt_or_halt(bus) {
+            return Ok(cycles);
+        }
+
+        let enable_ime_after_step = self.ime_enable_pending;
+        self.ime_enable_pending = false;
         let pc = self.registers.pc;
         let opcode = self.fetch8(bus);
 
-        match opcode {
+        let result = match opcode {
             0x00 => Ok(TCycles(4)),
             0x01 => Ok(self.ld_rr_d16(RegisterPair::BC, bus)),
             0x02 => Ok(self.ld_addr_rr_a(RegisterPair::BC, bus)),
@@ -132,6 +169,7 @@ impl Cpu {
             0x0D => Ok(self.dec_r(Register8::C)),
             0x0E => Ok(self.ld_r_d8(Register8::C, bus)),
             0x0F => Ok(self.rrca()),
+            0x10 => Ok(self.stop(bus)),
             0x11 => Ok(self.ld_rr_d16(RegisterPair::DE, bus)),
             0x12 => Ok(self.ld_addr_rr_a(RegisterPair::DE, bus)),
             0x13 => Ok(self.inc_rr(RegisterPair::DE)),
@@ -227,6 +265,7 @@ impl Cpu {
             0x73 => Ok(self.ld_addr_hl_r(Register8::E, bus)),
             0x74 => Ok(self.ld_addr_hl_r(Register8::H, bus)),
             0x75 => Ok(self.ld_addr_hl_r(Register8::L, bus)),
+            0x76 => Ok(self.halt()),
             0x77 => Ok(self.ld_addr_hl_a(bus)),
             0x78 => Ok(self.ld_r_r(Register8::A, Register8::B)),
             0x79 => Ok(self.ld_r_r(Register8::A, Register8::C)),
@@ -325,15 +364,23 @@ impl Cpu {
             0xEE => Ok(self.xor_a_d8(bus)),
             0xEF => Ok(self.rst(0x28, bus)),
             0xF0 => Ok(self.ldh_a_addr_a8(bus)),
+            0xF3 => Ok(self.di()),
             0xF6 => Ok(self.or_a_d8(bus)),
             0xF7 => Ok(self.rst(0x30, bus)),
             0xF8 => Ok(self.ld_hl_sp_e8(bus)),
             0xF9 => Ok(self.ld_sp_hl()),
             0xFA => Ok(self.ld_a_addr_a16(bus)),
+            0xFB => Ok(self.ei()),
             0xFE => Ok(self.cp_a_d8(bus)),
             0xFF => Ok(self.rst(0x38, bus)),
             _ => Err(CpuError::UnimplementedOpcode { pc, opcode }),
+        };
+
+        if result.is_ok() && enable_ime_after_step {
+            self.ime = true;
         }
+
+        result
     }
 
     /// Formats CPU state with an opcode for stable trace logging.
@@ -384,6 +431,58 @@ impl Cpu {
             Register8::H => self.registers.h = value,
             Register8::L => self.registers.l = value,
         }
+    }
+
+    fn service_interrupt_or_halt(&mut self, bus: &mut Bus) -> Option<TCycles> {
+        let pending = bus.pending_interrupt();
+
+        if self.run_state == CpuRunState::Halted && pending.is_none() {
+            return Some(TCycles(4));
+        }
+
+        if self.run_state == CpuRunState::Halted && pending.is_some() {
+            self.run_state = CpuRunState::Running;
+        }
+
+        if self.ime {
+            if let Some(interrupt) = pending {
+                self.ime = false;
+                self.ime_enable_pending = false;
+                bus.clear_interrupt(interrupt);
+                self.push16(bus, self.registers.pc);
+                self.registers.pc = interrupt.vector();
+
+                return Some(TCycles(20));
+            }
+        }
+
+        None
+    }
+
+    fn di(&mut self) -> TCycles {
+        self.ime = false;
+        self.ime_enable_pending = false;
+
+        TCycles(4)
+    }
+
+    fn ei(&mut self) -> TCycles {
+        self.ime_enable_pending = true;
+
+        TCycles(4)
+    }
+
+    fn halt(&mut self) -> TCycles {
+        self.run_state = CpuRunState::Halted;
+
+        TCycles(4)
+    }
+
+    fn stop(&mut self, bus: &Bus) -> TCycles {
+        let _padding = self.fetch8(bus);
+        self.run_state = CpuRunState::Stopped;
+
+        TCycles(4)
     }
 
     fn cb_operand(opcode: u8) -> CbOperand {
@@ -1153,7 +1252,7 @@ impl Default for Cpu {
 #[cfg(test)]
 mod tests {
     use super::{Cpu, CpuError, Register8, TCycles};
-    use crate::{bus::Bus, cartridge::Cartridge};
+    use crate::{bus::Bus, cartridge::Cartridge, interrupt::Interrupt};
 
     const ROM_SIZE: usize = 32 * 1024;
     const TITLE_START: usize = 0x0134;
@@ -2748,5 +2847,140 @@ mod tests {
             "SET 0,(HL) should take 16 T-cycles"
         );
         assert_eq!(bus.read8(0xC000), 0x01, "SET should update memory");
+    }
+
+    #[test]
+    fn di_and_ei_update_ime_with_ei_delayed_until_after_next_instruction() {
+        let mut bus = bus_with_bytes(&[(0x0100, 0xFB), (0x0101, 0x00), (0x0102, 0xF3)]);
+        let mut cpu = Cpu::new_dmg_post_boot();
+
+        let cycles = cpu.step(&mut bus);
+
+        assert_eq!(cycles, Ok(TCycles(4)), "EI should take 4 T-cycles");
+        assert!(
+            !cpu.ime(),
+            "EI should not enable IME until one instruction later"
+        );
+
+        let cycles = cpu.step(&mut bus);
+
+        assert_eq!(
+            cycles,
+            Ok(TCycles(4)),
+            "NOP after EI should take 4 T-cycles"
+        );
+        assert!(
+            cpu.ime(),
+            "IME should enable after the instruction following EI"
+        );
+
+        let cycles = cpu.step(&mut bus);
+
+        assert_eq!(cycles, Ok(TCycles(4)), "DI should take 4 T-cycles");
+        assert!(!cpu.ime(), "DI should clear IME immediately");
+    }
+
+    #[test]
+    fn interrupt_service_pushes_pc_clears_if_and_jumps_to_priority_vector() {
+        let mut bus = bus_with_bytes(&[(0x0100, 0x00)]);
+        let mut cpu = Cpu::new_dmg_post_boot();
+        cpu.registers.sp = 0xC100;
+        cpu.ime = true;
+        bus.write8(0xFFFF, Interrupt::VBlank.mask() | Interrupt::Timer.mask());
+        bus.request_interrupt(Interrupt::Timer);
+        bus.request_interrupt(Interrupt::VBlank);
+
+        let cycles = cpu.step(&mut bus);
+
+        assert_eq!(
+            cycles,
+            Ok(TCycles(20)),
+            "servicing an interrupt should take 20 T-cycles"
+        );
+        assert_eq!(
+            cpu.registers().pc,
+            0x0040,
+            "VBlank should be serviced before Timer"
+        );
+        assert_eq!(
+            cpu.registers().sp,
+            0xC0FE,
+            "interrupt service should push PC"
+        );
+        assert_eq!(
+            bus.read16(cpu.registers().sp),
+            0x0100,
+            "interrupt service should push the interrupted PC"
+        );
+        assert!(!cpu.ime(), "interrupt service should clear IME");
+        assert_eq!(
+            bus.interrupt_flags(),
+            Interrupt::Timer.mask(),
+            "serviced interrupt should be cleared from IF"
+        );
+    }
+
+    #[test]
+    fn halt_pauses_fetch_until_an_interrupt_is_pending_then_wakes() {
+        let mut bus = bus_with_bytes(&[(0x0100, 0x76), (0x0101, 0x00)]);
+        let mut cpu = Cpu::new_dmg_post_boot();
+
+        let cycles = cpu.step(&mut bus);
+
+        assert_eq!(cycles, Ok(TCycles(4)), "HALT should take 4 T-cycles");
+        assert!(cpu.halted(), "HALT should set the halted state");
+        assert_eq!(cpu.registers().pc, 0x0101, "HALT should consume its opcode");
+
+        let cycles = cpu.step(&mut bus);
+
+        assert_eq!(
+            cycles,
+            Ok(TCycles(4)),
+            "halted CPU should idle for 4 T-cycles"
+        );
+        assert_eq!(
+            cpu.registers().pc,
+            0x0101,
+            "halted CPU should not fetch while no interrupt is pending"
+        );
+
+        bus.write8(0xFFFF, Interrupt::Timer.mask());
+        bus.request_interrupt(Interrupt::Timer);
+        let cycles = cpu.step(&mut bus);
+
+        assert_eq!(
+            cycles,
+            Ok(TCycles(4)),
+            "woken CPU should execute the next opcode"
+        );
+        assert!(!cpu.halted(), "pending interrupt should wake HALT");
+        assert_eq!(
+            cpu.registers().pc,
+            0x0102,
+            "woken CPU should fetch normally"
+        );
+    }
+
+    #[test]
+    fn stop_sets_documented_placeholder_state_and_consumes_padding_byte() {
+        let mut bus = bus_with_bytes(&[(0x0100, 0x10), (0x0101, 0x00)]);
+        let mut cpu = Cpu::new_dmg_post_boot();
+
+        let cycles = cpu.step(&mut bus);
+
+        assert_eq!(
+            cycles,
+            Ok(TCycles(4)),
+            "STOP placeholder should take 4 T-cycles"
+        );
+        assert!(
+            cpu.stopped(),
+            "STOP should enter the placeholder stopped state"
+        );
+        assert_eq!(
+            cpu.registers().pc,
+            0x0102,
+            "STOP should consume its padding byte"
+        );
     }
 }

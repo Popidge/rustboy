@@ -1,5 +1,39 @@
 # Milestones
 
+## 0016: Implement rotate, shift, and bit operations
+
+Date: 2026-06-10
+
+Status: Complete
+
+### Goal
+
+Implement roadmap Stage 9 by adding accumulator rotates and CB-prefixed rotate, shift, bit, set, and reset operations.
+
+### Changes
+
+- Added `RLCA`, `RLA`, `RRCA`, and `RRA`.
+- Added CB-prefixed dispatch and operand decoding for registers and `(HL)`.
+- Added CB rotate, shift, `SWAP`, `BIT`, `RES`, and `SET` behavior.
+- Applied longer cycle counts for `(HL)` CB operands.
+
+### Tests
+
+- `cargo fmt`
+- `cargo test`
+- `cargo clippy --all-targets --all-features`
+- Added CPU tests for non-CB rotates, CB register rotate/shift/swap operations, all bit positions for `BIT`/`RES`/`SET`, and `(HL)` memory cycles.
+
+### Decisions
+
+- Kept CB decoding explicit and local to the CPU module without macro-generated tables.
+- Used a small internal `CbOperand` enum to distinguish register operands from `(HL)`.
+- Added no dependencies.
+
+### Notes
+
+- Interrupts, timers, and serial output remain the next roadmap stages.
+
 ## 0015: Implement CPU control flow instructions
 
 Date: 2026-06-10

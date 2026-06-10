@@ -24,6 +24,12 @@ enum Register8 {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CbOperand {
+    Register(Register8),
+    AddressHl,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Condition {
     NotZero,
     Zero,
@@ -118,24 +124,28 @@ impl Cpu {
             0x04 => Ok(self.inc_r(Register8::B)),
             0x05 => Ok(self.dec_r(Register8::B)),
             0x06 => Ok(self.ld_r_d8(Register8::B, bus)),
+            0x07 => Ok(self.rlca()),
             0x09 => Ok(self.add_hl_rr(RegisterPair::BC)),
             0x0A => Ok(self.ld_a_addr_rr(RegisterPair::BC, bus)),
             0x0B => Ok(self.dec_rr(RegisterPair::BC)),
             0x0C => Ok(self.inc_r(Register8::C)),
             0x0D => Ok(self.dec_r(Register8::C)),
             0x0E => Ok(self.ld_r_d8(Register8::C, bus)),
+            0x0F => Ok(self.rrca()),
             0x11 => Ok(self.ld_rr_d16(RegisterPair::DE, bus)),
             0x12 => Ok(self.ld_addr_rr_a(RegisterPair::DE, bus)),
             0x13 => Ok(self.inc_rr(RegisterPair::DE)),
             0x14 => Ok(self.inc_r(Register8::D)),
             0x15 => Ok(self.dec_r(Register8::D)),
             0x16 => Ok(self.ld_r_d8(Register8::D, bus)),
+            0x17 => Ok(self.rla()),
             0x19 => Ok(self.add_hl_rr(RegisterPair::DE)),
             0x1A => Ok(self.ld_a_addr_rr(RegisterPair::DE, bus)),
             0x1B => Ok(self.dec_rr(RegisterPair::DE)),
             0x1C => Ok(self.inc_r(Register8::E)),
             0x1D => Ok(self.dec_r(Register8::E)),
             0x1E => Ok(self.ld_r_d8(Register8::E, bus)),
+            0x1F => Ok(self.rra()),
             0x18 => Ok(self.jr_e8(bus)),
             0x20 => Ok(self.jr_cc_e8(Condition::NotZero, bus)),
             0x21 => Ok(self.ld_rr_d16(RegisterPair::HL, bus)),
@@ -282,6 +292,7 @@ impl Cpu {
             0xBC => Ok(self.cp_a_r(Register8::H)),
             0xBD => Ok(self.cp_a_r(Register8::L)),
             0xBF => Ok(self.cp_a_r(Register8::A)),
+            0xCB => Ok(self.step_cb(bus)),
             0xC0 => Ok(self.ret_cc(Condition::NotZero, bus)),
             0xC2 => Ok(self.jp_cc_a16(Condition::NotZero, bus)),
             0xC3 => Ok(self.jp_a16(bus)),
@@ -373,6 +384,195 @@ impl Cpu {
             Register8::H => self.registers.h = value,
             Register8::L => self.registers.l = value,
         }
+    }
+
+    fn cb_operand(opcode: u8) -> CbOperand {
+        match opcode & 0x07 {
+            0 => CbOperand::Register(Register8::B),
+            1 => CbOperand::Register(Register8::C),
+            2 => CbOperand::Register(Register8::D),
+            3 => CbOperand::Register(Register8::E),
+            4 => CbOperand::Register(Register8::H),
+            5 => CbOperand::Register(Register8::L),
+            6 => CbOperand::AddressHl,
+            7 => CbOperand::Register(Register8::A),
+            _ => unreachable!("three low bits produce values 0 through 7"),
+        }
+    }
+
+    fn read_cb_operand(&self, operand: CbOperand, bus: &Bus) -> u8 {
+        match operand {
+            CbOperand::Register(register) => self.read_register8(register),
+            CbOperand::AddressHl => bus.read8(self.registers.hl()),
+        }
+    }
+
+    fn write_cb_operand(&mut self, operand: CbOperand, bus: &mut Bus, value: u8) {
+        match operand {
+            CbOperand::Register(register) => self.write_register8(register, value),
+            CbOperand::AddressHl => bus.write8(self.registers.hl(), value),
+        }
+    }
+
+    fn cb_cycles(operand: CbOperand, memory_cycles: u32, register_cycles: u32) -> TCycles {
+        match operand {
+            CbOperand::AddressHl => TCycles(memory_cycles),
+            CbOperand::Register(_) => TCycles(register_cycles),
+        }
+    }
+
+    fn step_cb(&mut self, bus: &mut Bus) -> TCycles {
+        let opcode = self.fetch8(bus);
+        let operand = Self::cb_operand(opcode);
+
+        match opcode {
+            0x00..=0x07 => self.cb_update_operand(operand, bus, Self::rotate_left_circular),
+            0x08..=0x0F => self.cb_update_operand(operand, bus, Self::rotate_right_circular),
+            0x10..=0x17 => self.cb_update_operand(operand, bus, Self::rotate_left_through_carry),
+            0x18..=0x1F => self.cb_update_operand(operand, bus, Self::rotate_right_through_carry),
+            0x20..=0x27 => self.cb_update_operand(operand, bus, Self::shift_left_arithmetic),
+            0x28..=0x2F => self.cb_update_operand(operand, bus, Self::shift_right_arithmetic),
+            0x30..=0x37 => self.cb_update_operand(operand, bus, Self::swap_nibbles),
+            0x38..=0x3F => self.cb_update_operand(operand, bus, Self::shift_right_logical),
+            0x40..=0x7F => self.cb_bit(opcode, operand, bus),
+            0x80..=0xBF => self.cb_res(opcode, operand, bus),
+            0xC0..=0xFF => self.cb_set(opcode, operand, bus),
+        }
+    }
+
+    fn rlca(&mut self) -> TCycles {
+        let value = self.registers.a;
+        let result = value.rotate_left(1);
+
+        self.registers.a = result;
+        self.set_rotate_flags(false, value & 0x80 != 0);
+
+        TCycles(4)
+    }
+
+    fn rla(&mut self) -> TCycles {
+        let value = self.registers.a;
+        let carry_in = u8::from(self.registers.f.carry());
+        let result = (value << 1) | carry_in;
+
+        self.registers.a = result;
+        self.set_rotate_flags(false, value & 0x80 != 0);
+
+        TCycles(4)
+    }
+
+    fn rrca(&mut self) -> TCycles {
+        let value = self.registers.a;
+        let result = value.rotate_right(1);
+
+        self.registers.a = result;
+        self.set_rotate_flags(false, value & 0x01 != 0);
+
+        TCycles(4)
+    }
+
+    fn rra(&mut self) -> TCycles {
+        let value = self.registers.a;
+        let carry_in = u8::from(self.registers.f.carry()) << 7;
+        let result = (value >> 1) | carry_in;
+
+        self.registers.a = result;
+        self.set_rotate_flags(false, value & 0x01 != 0);
+
+        TCycles(4)
+    }
+
+    fn cb_update_operand(
+        &mut self,
+        operand: CbOperand,
+        bus: &mut Bus,
+        operation: fn(&mut Self, u8) -> (u8, bool),
+    ) -> TCycles {
+        let value = self.read_cb_operand(operand, bus);
+        let (result, carry) = operation(self, value);
+
+        self.write_cb_operand(operand, bus, result);
+        self.set_rotate_flags(result == 0, carry);
+
+        Self::cb_cycles(operand, 16, 8)
+    }
+
+    #[allow(clippy::unused_self)]
+    fn rotate_left_circular(&mut self, value: u8) -> (u8, bool) {
+        (value.rotate_left(1), value & 0x80 != 0)
+    }
+
+    #[allow(clippy::unused_self)]
+    fn rotate_right_circular(&mut self, value: u8) -> (u8, bool) {
+        (value.rotate_right(1), value & 0x01 != 0)
+    }
+
+    fn rotate_left_through_carry(&mut self, value: u8) -> (u8, bool) {
+        let carry_in = u8::from(self.registers.f.carry());
+
+        ((value << 1) | carry_in, value & 0x80 != 0)
+    }
+
+    fn rotate_right_through_carry(&mut self, value: u8) -> (u8, bool) {
+        let carry_in = u8::from(self.registers.f.carry()) << 7;
+
+        ((value >> 1) | carry_in, value & 0x01 != 0)
+    }
+
+    #[allow(clippy::unused_self)]
+    fn shift_left_arithmetic(&mut self, value: u8) -> (u8, bool) {
+        (value << 1, value & 0x80 != 0)
+    }
+
+    #[allow(clippy::unused_self)]
+    fn shift_right_arithmetic(&mut self, value: u8) -> (u8, bool) {
+        ((value >> 1) | (value & 0x80), value & 0x01 != 0)
+    }
+
+    #[allow(clippy::unused_self)]
+    fn shift_right_logical(&mut self, value: u8) -> (u8, bool) {
+        (value >> 1, value & 0x01 != 0)
+    }
+
+    #[allow(clippy::unused_self)]
+    fn swap_nibbles(&mut self, value: u8) -> (u8, bool) {
+        (value.rotate_left(4), false)
+    }
+
+    fn set_rotate_flags(&mut self, zero: bool, carry: bool) {
+        self.registers.f.set_zero(zero);
+        self.registers.f.set_subtract(false);
+        self.registers.f.set_half_carry(false);
+        self.registers.f.set_carry(carry);
+    }
+
+    fn cb_bit(&mut self, opcode: u8, operand: CbOperand, bus: &Bus) -> TCycles {
+        let bit = (opcode >> 3) & 0x07;
+        let value = self.read_cb_operand(operand, bus);
+
+        self.registers.f.set_zero(value & (1 << bit) == 0);
+        self.registers.f.set_subtract(false);
+        self.registers.f.set_half_carry(true);
+
+        Self::cb_cycles(operand, 12, 8)
+    }
+
+    fn cb_res(&mut self, opcode: u8, operand: CbOperand, bus: &mut Bus) -> TCycles {
+        let bit = (opcode >> 3) & 0x07;
+        let value = self.read_cb_operand(operand, bus) & !(1 << bit);
+
+        self.write_cb_operand(operand, bus, value);
+
+        Self::cb_cycles(operand, 16, 8)
+    }
+
+    fn cb_set(&mut self, opcode: u8, operand: CbOperand, bus: &mut Bus) -> TCycles {
+        let bit = (opcode >> 3) & 0x07;
+        let value = self.read_cb_operand(operand, bus) | (1 << bit);
+
+        self.write_cb_operand(operand, bus, value);
+
+        Self::cb_cycles(operand, 16, 8)
     }
 
     fn ld_r_d8(&mut self, register: Register8, bus: &Bus) -> TCycles {
@@ -2361,5 +2561,192 @@ mod tests {
                 "RST should push the address after the opcode"
             );
         }
+    }
+
+    #[test]
+    fn non_cb_rotates_update_a_and_carry_with_zero_always_clear() {
+        let cases = [
+            (
+                0x07,
+                0x80,
+                false,
+                0x01,
+                true,
+                "RLCA moves bit 7 into bit 0 and carry",
+            ),
+            (
+                0x17,
+                0x80,
+                true,
+                0x01,
+                true,
+                "RLA rotates through incoming carry",
+            ),
+            (
+                0x0F,
+                0x01,
+                false,
+                0x80,
+                true,
+                "RRCA moves bit 0 into bit 7 and carry",
+            ),
+            (
+                0x1F,
+                0x01,
+                true,
+                0x80,
+                true,
+                "RRA rotates through incoming carry",
+            ),
+            (
+                0x07,
+                0x00,
+                false,
+                0x00,
+                false,
+                "RLCA keeps Z clear even for zero result",
+            ),
+        ];
+
+        for (opcode, value, carry_in, expected, carry, name) in cases {
+            let mut bus = bus_with_bytes(&[(0x0100, opcode)]);
+            let mut cpu = Cpu::new_dmg_post_boot();
+            cpu.registers.a = value;
+            cpu.registers.f.set_raw(0xF0);
+            cpu.registers.f.set_carry(carry_in);
+
+            let cycles = cpu.step(&mut bus);
+
+            assert_eq!(cycles, Ok(TCycles(4)), "{name} cycles");
+            assert_eq!(cpu.registers().a, expected, "{name} result");
+            assert_flags(&cpu, false, false, false, carry);
+        }
+    }
+
+    #[test]
+    fn cb_rotate_shift_and_swap_register_ops_update_values_and_flags() {
+        let cases = [
+            (0x00, Register8::B, 0x80, false, 0x01, false, true, "RLC B"),
+            (0x09, Register8::C, 0x01, false, 0x80, false, true, "RRC C"),
+            (0x12, Register8::D, 0x80, true, 0x01, false, true, "RL D"),
+            (0x1B, Register8::E, 0x01, true, 0x80, false, true, "RR E"),
+            (0x24, Register8::H, 0x81, false, 0x02, false, true, "SLA H"),
+            (0x2D, Register8::L, 0x81, false, 0xC0, false, true, "SRA L"),
+            (
+                0x37,
+                Register8::A,
+                0xF0,
+                false,
+                0x0F,
+                false,
+                false,
+                "SWAP A",
+            ),
+            (0x38, Register8::B, 0x01, false, 0x00, true, true, "SRL B"),
+        ];
+
+        for (cb_opcode, register, value, carry_in, expected, zero, carry, name) in cases {
+            let mut bus = bus_with_bytes(&[(0x0100, 0xCB), (0x0101, cb_opcode)]);
+            let mut cpu = Cpu::new_dmg_post_boot();
+            cpu.write_register8(register, value);
+            cpu.registers.f.set_carry(carry_in);
+
+            let cycles = cpu.step(&mut bus);
+
+            assert_eq!(cycles, Ok(TCycles(8)), "{name} cycles");
+            assert_eq!(cpu.read_register8(register), expected, "{name} result");
+            assert_flags(&cpu, zero, false, false, carry);
+            assert_eq!(
+                cpu.registers().pc,
+                0x0102,
+                "CB instruction should consume two bytes"
+            );
+        }
+    }
+
+    #[test]
+    fn cb_bit_set_and_res_register_ops_cover_all_bit_positions() {
+        for bit in 0..=7 {
+            let bit_opcode = 0x40 | (bit << 3);
+            let res_opcode = 0x80 | (bit << 3);
+            let set_opcode = 0xC0 | (bit << 3);
+
+            let mut bus = bus_with_bytes(&[(0x0100, 0xCB), (0x0101, bit_opcode)]);
+            let mut cpu = Cpu::new_dmg_post_boot();
+            cpu.registers.b = 1 << bit;
+            cpu.registers.f.set_carry(true);
+
+            let cycles = cpu.step(&mut bus);
+
+            assert_eq!(cycles, Ok(TCycles(8)), "BIT {bit},B cycles");
+            assert_flags(&cpu, false, false, true, true);
+            assert_eq!(
+                cpu.registers().b,
+                1 << bit,
+                "BIT should not modify the operand"
+            );
+
+            let mut bus = bus_with_bytes(&[(0x0100, 0xCB), (0x0101, res_opcode)]);
+            let mut cpu = Cpu::new_dmg_post_boot();
+            cpu.registers.b = 0xFF;
+
+            let cycles = cpu.step(&mut bus);
+
+            assert_eq!(cycles, Ok(TCycles(8)), "RES {bit},B cycles");
+            assert_eq!(cpu.registers().b, !(1 << bit), "RES should clear bit {bit}");
+
+            let mut bus = bus_with_bytes(&[(0x0100, 0xCB), (0x0101, set_opcode)]);
+            let mut cpu = Cpu::new_dmg_post_boot();
+
+            let cycles = cpu.step(&mut bus);
+
+            assert_eq!(cycles, Ok(TCycles(8)), "SET {bit},B cycles");
+            assert_eq!(cpu.registers().b, 1 << bit, "SET should set bit {bit}");
+        }
+    }
+
+    #[test]
+    fn cb_ops_on_hl_use_memory_operand_and_longer_cycles() {
+        let mut bus = bus_with_bytes(&[(0x0100, 0xCB), (0x0101, 0x06)]);
+        let mut cpu = Cpu::new_dmg_post_boot();
+        cpu.registers.set_hl(0xC000);
+        bus.write8(0xC000, 0x80);
+
+        let cycles = cpu.step(&mut bus);
+
+        assert_eq!(cycles, Ok(TCycles(16)), "RLC (HL) should take 16 T-cycles");
+        assert_eq!(
+            bus.read8(0xC000),
+            0x01,
+            "RLC should write the memory result"
+        );
+        assert_flags(&cpu, false, false, false, true);
+
+        let mut bus = bus_with_bytes(&[(0x0100, 0xCB), (0x0101, 0x7E)]);
+        let mut cpu = Cpu::new_dmg_post_boot();
+        cpu.registers.set_hl(0xC000);
+        bus.write8(0xC000, 0x00);
+
+        let cycles = cpu.step(&mut bus);
+
+        assert_eq!(
+            cycles,
+            Ok(TCycles(12)),
+            "BIT 7,(HL) should take 12 T-cycles"
+        );
+        assert_flags(&cpu, true, false, true, cpu.registers().f.carry());
+
+        let mut bus = bus_with_bytes(&[(0x0100, 0xCB), (0x0101, 0xC6)]);
+        let mut cpu = Cpu::new_dmg_post_boot();
+        cpu.registers.set_hl(0xC000);
+
+        let cycles = cpu.step(&mut bus);
+
+        assert_eq!(
+            cycles,
+            Ok(TCycles(16)),
+            "SET 0,(HL) should take 16 T-cycles"
+        );
+        assert_eq!(bus.read8(0xC000), 0x01, "SET should update memory");
     }
 }

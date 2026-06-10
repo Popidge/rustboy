@@ -215,7 +215,7 @@ impl Ppu {
         let screen_y = usize::from(line);
         for screen_x in 0..SCREEN_WIDTH {
             let screen_x_u8 = u8::try_from(screen_x).expect("screen width is smaller than u8::MAX");
-            let color_index = self.background_color_index(screen_x_u8, line);
+            let color_index = self.background_or_window_color_index(screen_x_u8, line);
             let color = self.map_background_color(color_index);
             self.framebuffer[screen_y * SCREEN_WIDTH + screen_x] = color;
         }
@@ -223,11 +223,19 @@ impl Ppu {
         self.render_sprites_on_scanline(line);
     }
 
-    fn background_color_index(&self, screen_x: u8, screen_y: u8) -> u8 {
+    fn background_or_window_color_index(&self, screen_x: u8, screen_y: u8) -> u8 {
         if !self.lcdc.background_enabled() {
             return 0;
         }
 
+        if let Some(color_index) = self.window_color_index(screen_x, screen_y) {
+            return color_index;
+        }
+
+        self.background_color_index(screen_x, screen_y)
+    }
+
+    fn background_color_index(&self, screen_x: u8, screen_y: u8) -> u8 {
         let bg_x = screen_x.wrapping_add(self.scx);
         let bg_y = screen_y.wrapping_add(self.scy);
         let tile_col = usize::from(bg_x / 8);
@@ -240,6 +248,33 @@ impl Ppu {
         let high = self.vram[tile_data_offset + row * 2 + 1];
 
         decode_tile_row(low, high)[usize::from(bg_x % 8)]
+    }
+
+    fn window_color_index(&self, screen_x: u8, screen_y: u8) -> Option<u8> {
+        if !self.lcdc.window_enabled() || screen_y < self.wy {
+            return None;
+        }
+
+        let window_left = i16::from(self.wx) - 7;
+        let screen_x = i16::from(screen_x);
+
+        if screen_x < window_left {
+            return None;
+        }
+
+        let window_x = usize::try_from(screen_x - window_left)
+            .expect("window x should be non-negative after bounds check");
+        let window_y = usize::from(screen_y - self.wy);
+        let tile_col = (window_x / 8) & 31;
+        let tile_row = (window_y / 8) & 31;
+        let tile_map_index = tile_row * 32 + tile_col;
+        let tile_number = self.vram[self.lcdc.window_tile_map_offset() + tile_map_index];
+        let tile_data_offset = self.lcdc.tile_data_offset(tile_number);
+        let row = window_y % 8;
+        let low = self.vram[tile_data_offset + row * 2];
+        let high = self.vram[tile_data_offset + row * 2 + 1];
+
+        Some(decode_tile_row(low, high)[window_x % 8])
     }
 
     fn map_background_color(&self, color_index: u8) -> u32 {
@@ -302,7 +337,7 @@ impl Ppu {
 
                 let screen_x_u8 =
                     u8::try_from(screen_x).expect("screen width is smaller than u8::MAX");
-                let background_index = self.background_color_index(screen_x_u8, line);
+                let background_index = self.background_or_window_color_index(screen_x_u8, line);
 
                 if sprite.bg_priority && background_index != 0 {
                     continue;
@@ -376,6 +411,11 @@ impl Lcdc {
     }
 
     #[must_use]
+    fn window_enabled(self) -> bool {
+        self.bits & 0x20 != 0
+    }
+
+    #[must_use]
     fn sprites_enabled(self) -> bool {
         self.bits & 0x02 != 0
     }
@@ -406,6 +446,15 @@ impl Lcdc {
     #[must_use]
     fn background_tile_map_offset(self) -> usize {
         if self.bits & 0x08 != 0 {
+            0x1C00
+        } else {
+            0x1800
+        }
+    }
+
+    #[must_use]
+    fn window_tile_map_offset(self) -> usize {
+        if self.bits & 0x40 != 0 {
             0x1C00
         } else {
             0x1800
@@ -718,6 +767,53 @@ mod tests {
             ppu.framebuffer()[8 * SCREEN_WIDTH],
             DMG_SHADES[1],
             "8x16 sprites should draw the lower half from the next tile"
+        );
+    }
+
+    #[test]
+    fn window_renders_at_wx_minus_seven_and_wy() {
+        let mut ppu = Ppu::new();
+        ppu.write_register(0xFF40, 0xB9);
+        ppu.write_register(0xFF47, 0b1110_0100);
+        ppu.write_register(0xFF4A, 2);
+        ppu.write_register(0xFF4B, 8);
+        ppu.write_vram(0x0010, 0b1000_0000);
+        ppu.write_vram(0x0011, 0);
+        ppu.write_vram(0x1800, 1);
+        ppu.write_vram(0x1C00, 0);
+
+        ppu.render_background();
+
+        assert_eq!(
+            ppu.framebuffer()[2 * SCREEN_WIDTH],
+            DMG_SHADES[0],
+            "before WX-7 the background should remain visible"
+        );
+        assert_eq!(
+            ppu.framebuffer()[2 * SCREEN_WIDTH + 1],
+            DMG_SHADES[1],
+            "window pixel 0 should appear at screen x = WX - 7"
+        );
+    }
+
+    #[test]
+    fn window_uses_selected_tile_map() {
+        let mut ppu = Ppu::new();
+        ppu.write_register(0xFF40, 0xF1);
+        ppu.write_register(0xFF47, 0b1110_0100);
+        ppu.write_register(0xFF4A, 0);
+        ppu.write_register(0xFF4B, 7);
+        ppu.write_vram(0x0010, 0b1000_0000);
+        ppu.write_vram(0x0011, 0);
+        ppu.write_vram(0x1800, 0);
+        ppu.write_vram(0x1C00, 1);
+
+        ppu.render_background();
+
+        assert_eq!(
+            ppu.framebuffer()[0],
+            DMG_SHADES[1],
+            "LCDC bit 6 should select the 0x9C00 window tile map"
         );
     }
 

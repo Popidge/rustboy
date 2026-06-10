@@ -1,5 +1,40 @@
 # Milestones
 
+## 0027: Add basic window layer
+
+Date: 2026-06-10
+
+Status: Complete
+
+### Goal
+
+Implement roadmap Stage 20.1 by rendering the DMG window layer using LCDC window enable, tile-map selection, and WX/WY placement.
+
+### Changes
+
+- Added window rendering to the PPU scanline path before sprites are composed.
+- Used `WX - 7` and `WY` to position the window on screen.
+- Added LCDC helpers for window enable and window tile-map selection.
+- Made sprite priority compare against the composed background/window colour index.
+
+### Tests
+
+- `cargo fmt`
+- `cargo test -p gb-core window`
+- `cargo test`
+- `cargo clippy --all-targets --all-features`
+- Added PPU tests for window placement and selected window tile map.
+
+### Decisions
+
+- Kept this to basic DMG window rendering; timing quirks remain deferred to roadmap Stage 20.2.
+- Reused the existing background tile data selection and palette mapping.
+- Added no dependencies.
+
+### Notes
+
+- Window rendering now exists alongside background, sprites, and keyboard input, which should make more simple DMG games visually interactive.
+
 ## 0026: Add DMA and sprite rendering
 
 Date: 2026-06-10

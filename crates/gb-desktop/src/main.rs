@@ -7,7 +7,12 @@ use gb_core::{
     GameBoy,
 };
 use pixels::{Pixels, SurfaceTexture};
-use std::{env, error::Error, fs};
+use std::{
+    env,
+    error::Error,
+    fs,
+    time::{Duration, Instant},
+};
 use winit::{
     application::ApplicationHandler,
     dpi::LogicalSize,
@@ -18,6 +23,8 @@ use winit::{
 };
 
 const SCALE: u32 = 4;
+const DMG_CPU_CLOCK_HZ: u64 = 4_194_304;
+const DMG_TCYCLES_PER_FRAME: u64 = 456 * 154;
 
 fn main() -> Result<(), Box<dyn Error>> {
     let options = Options::parse(env::args().skip(1))?;
@@ -173,6 +180,7 @@ struct DesktopApp {
     source: DisplaySource,
     window: Option<&'static Window>,
     pixels: Option<Pixels<'static>>,
+    frame_pacer: FramePacer,
 }
 
 impl DesktopApp {
@@ -181,6 +189,7 @@ impl DesktopApp {
             source,
             window: None,
             pixels: None,
+            frame_pacer: FramePacer::new(),
         }
     }
 
@@ -206,6 +215,11 @@ impl DesktopApp {
     }
 
     fn redraw(&mut self, event_loop: &ActiveEventLoop) {
+        if !self.frame_pacer.should_present(Instant::now()) {
+            event_loop.set_control_flow(ControlFlow::WaitUntil(self.frame_pacer.next_frame_at()));
+            return;
+        }
+
         let Some(pixels) = self.pixels.as_mut() else {
             return;
         };
@@ -219,7 +233,10 @@ impl DesktopApp {
         if let Err(error) = pixels.render() {
             eprintln!("{error}");
             event_loop.exit();
+            return;
         }
+
+        self.frame_pacer.schedule_next_frame(Instant::now());
     }
 }
 
@@ -254,11 +271,51 @@ impl ApplicationHandler for DesktopApp {
         }
     }
 
-    fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         if let Some(window) = self.window {
-            window.request_redraw();
+            let now = Instant::now();
+
+            if self.frame_pacer.should_present(now) {
+                event_loop.set_control_flow(ControlFlow::Poll);
+                window.request_redraw();
+            } else {
+                event_loop
+                    .set_control_flow(ControlFlow::WaitUntil(self.frame_pacer.next_frame_at()));
+            }
         }
     }
+}
+
+#[derive(Debug)]
+struct FramePacer {
+    frame_interval: Duration,
+    next_frame_at: Instant,
+}
+
+impl FramePacer {
+    fn new() -> Self {
+        Self {
+            frame_interval: dmg_frame_interval(),
+            next_frame_at: Instant::now(),
+        }
+    }
+
+    fn should_present(&self, now: Instant) -> bool {
+        now >= self.next_frame_at
+    }
+
+    fn next_frame_at(&self) -> Instant {
+        self.next_frame_at
+    }
+
+    fn schedule_next_frame(&mut self, now: Instant) {
+        self.next_frame_at = now + self.frame_interval;
+    }
+}
+
+fn dmg_frame_interval() -> Duration {
+    let nanos = (DMG_TCYCLES_PER_FRAME * 1_000_000_000 + (DMG_CPU_CLOCK_HZ / 2)) / DMG_CPU_CLOCK_HZ;
+    Duration::from_nanos(nanos)
 }
 
 fn key_to_button(key: PhysicalKey) -> Option<Button> {
@@ -279,5 +336,46 @@ fn copy_framebuffer(source: &[u32], target: &mut [u8]) {
     for (pixel, rgba) in source.iter().zip(target.chunks_exact_mut(4)) {
         let [alpha, red, green, blue] = pixel.to_be_bytes();
         rgba.copy_from_slice(&[red, green, blue, alpha]);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dmg_frame_interval_matches_hardware_refresh_rate() {
+        let interval = dmg_frame_interval();
+
+        assert_eq!(
+            interval.as_nanos(),
+            16_742_706,
+            "DMG frame interval should be approximately 16.74 ms from 70224 T-cycles at 4194304 Hz"
+        );
+    }
+
+    #[test]
+    fn frame_pacer_waits_until_next_scheduled_frame() {
+        let now = Instant::now();
+        let mut pacer = FramePacer {
+            frame_interval: Duration::from_millis(10),
+            next_frame_at: now,
+        };
+
+        assert!(
+            pacer.should_present(now),
+            "pacer should allow presentation at the scheduled instant"
+        );
+
+        pacer.schedule_next_frame(now);
+
+        assert!(
+            !pacer.should_present(now + Duration::from_millis(9)),
+            "pacer should hold redraw requests until the frame interval has elapsed"
+        );
+        assert!(
+            pacer.should_present(now + Duration::from_millis(10)),
+            "pacer should allow redraw at the next scheduled frame"
+        );
     }
 }

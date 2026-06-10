@@ -1,5 +1,38 @@
 # Milestones
 
+## 0028: Enforce desktop frame pacing
+
+Date: 2026-06-10
+
+Status: Complete
+
+### Goal
+
+Add the extra roadmap milestone between Stages 20 and 21 by pacing desktop presentation to the DMG refresh rate instead of host redraw speed.
+
+### Changes
+
+- Added a `FramePacer` in `gb-desktop` that targets one frame every 70224 T-cycles at 4194304 Hz.
+- Used `ControlFlow::WaitUntil` between redraws so a fast host display does not make emulation sprint.
+- Scheduled the next frame after a successful `pixels.render()`.
+
+### Tests
+
+- `cargo fmt`
+- `cargo test`
+- `cargo clippy --all-targets --all-features`
+- Added desktop unit tests for the 16.74 ms DMG frame interval and pacer wait behavior.
+
+### Decisions
+
+- Kept pacing in `gb-desktop`; `gb-core` cycle and PPU timing were not changed.
+- Added no dependencies.
+
+### Notes
+
+- The target interval is approximately 16.742706 ms, matching about 59.7275 Hz.
+- Later accuracy work can still refine CPU/PPU timing, but desktop refresh rate should no longer directly speed up gameplay.
+
 ## 0027: Add basic window layer
 
 Date: 2026-06-10

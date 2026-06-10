@@ -4,6 +4,7 @@ pub mod bus;
 pub mod cartridge;
 pub mod cpu;
 pub mod interrupt;
+pub mod joypad;
 pub mod ppu;
 pub mod serial;
 pub mod timer;
@@ -11,6 +12,7 @@ pub mod timer;
 use bus::Bus;
 use cartridge::{Cartridge, CartridgeError};
 use cpu::{Cpu, CpuError, TCycles};
+use joypad::Button;
 use ppu::FRAMEBUFFER_PIXELS;
 
 /// Top-level owner for the emulated DMG Game Boy.
@@ -81,6 +83,11 @@ impl GameBoy {
     /// Drains collected serial debug output.
     pub fn take_serial_output(&mut self) -> Vec<u8> {
         self.bus.take_serial_output()
+    }
+
+    /// Updates one joypad button state.
+    pub fn set_button(&mut self, button: Button, pressed: bool) {
+        self.bus.set_button(button, pressed);
     }
 }
 

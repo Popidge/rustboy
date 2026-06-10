@@ -1,5 +1,40 @@
 # Milestones
 
+## 0025: Add joypad input
+
+Date: 2026-06-10
+
+Status: Complete
+
+### Goal
+
+Implement roadmap Stage 18 by modelling DMG joypad state, routing the `FF00` register, mapping desktop keyboard input, and requesting Joypad interrupts on new button presses.
+
+### Changes
+
+- Added `gb_core::joypad` with `Button` and active-low action/direction group register behaviour.
+- Routed `FF00` through `Bus` and exposed `GameBoy::set_button`.
+- Mapped desktop keyboard input to joypad buttons: arrows, `Z`, `X`, `Enter`, and right shift.
+- Requested the Joypad interrupt when a button transitions from released to pressed.
+
+### Tests
+
+- `cargo fmt`
+- `cargo test -p gb-core joypad`
+- `cargo test`
+- `cargo clippy --all-targets --all-features`
+- Added joypad unit tests and a bus routing test for `FF00` and interrupt requests.
+
+### Decisions
+
+- Kept all windowing key types in `gb-desktop`; `gb-core` only knows the `Button` enum.
+- Stored joypad button state in a fixed `[bool; 8]` array.
+- Added no dependencies.
+
+### Notes
+
+- Keyboard input now reaches the core, but gameplay also depends on the remaining PPU sprite/window work.
+
 ## 0024: Add basic desktop display
 
 Date: 2026-06-10

@@ -2,6 +2,7 @@ use gb_core::{
     bus::Bus,
     cartridge::Cartridge,
     cpu::Cpu,
+    joypad::Button,
     ppu::{SCREEN_HEIGHT, SCREEN_WIDTH},
     GameBoy,
 };
@@ -10,8 +11,9 @@ use std::{env, error::Error, fs};
 use winit::{
     application::ApplicationHandler,
     dpi::LogicalSize,
-    event::WindowEvent,
+    event::{ElementState, WindowEvent},
     event_loop::{ActiveEventLoop, ControlFlow, EventLoop},
+    keyboard::{KeyCode, PhysicalKey},
     window::{Window, WindowAttributes, WindowId},
 };
 
@@ -126,6 +128,12 @@ impl DisplaySource {
             Self::Demo(demo) => Some(demo.next_frame()),
         }
     }
+
+    fn set_button(&mut self, button: Button, pressed: bool) {
+        if let Self::Emulator(game_boy) = self {
+            game_boy.set_button(button, pressed);
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -231,6 +239,12 @@ impl ApplicationHandler for DesktopApp {
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::RedrawRequested => self.redraw(event_loop),
+            WindowEvent::KeyboardInput { event, .. } => {
+                if let Some(button) = key_to_button(event.physical_key) {
+                    self.source
+                        .set_button(button, event.state == ElementState::Pressed);
+                }
+            }
             WindowEvent::Resized(size) => {
                 if let Some(pixels) = self.pixels.as_mut() {
                     let _ = pixels.resize_surface(size.width, size.height);
@@ -244,6 +258,20 @@ impl ApplicationHandler for DesktopApp {
         if let Some(window) = self.window {
             window.request_redraw();
         }
+    }
+}
+
+fn key_to_button(key: PhysicalKey) -> Option<Button> {
+    match key {
+        PhysicalKey::Code(KeyCode::ArrowRight) => Some(Button::Right),
+        PhysicalKey::Code(KeyCode::ArrowLeft) => Some(Button::Left),
+        PhysicalKey::Code(KeyCode::ArrowUp) => Some(Button::Up),
+        PhysicalKey::Code(KeyCode::ArrowDown) => Some(Button::Down),
+        PhysicalKey::Code(KeyCode::KeyZ) => Some(Button::A),
+        PhysicalKey::Code(KeyCode::KeyX) => Some(Button::B),
+        PhysicalKey::Code(KeyCode::Enter) => Some(Button::Start),
+        PhysicalKey::Code(KeyCode::ShiftRight) => Some(Button::Select),
+        _ => None,
     }
 }
 

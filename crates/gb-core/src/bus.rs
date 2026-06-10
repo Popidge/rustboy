@@ -8,6 +8,7 @@ use crate::{
     cartridge::Cartridge,
     cpu::TCycles,
     interrupt::{Interrupt, InterruptFlags},
+    joypad::{Button, Joypad},
     ppu::{Ppu, FRAMEBUFFER_PIXELS},
     serial::Serial,
     timer::Timer,
@@ -23,6 +24,7 @@ const HRAM_SIZE: usize = 0x007F;
 
 const INTERRUPT_ENABLE_ADDR: u16 = 0xFFFF;
 const INTERRUPT_FLAGS_ADDR: u16 = 0xFF0F;
+const JOYPAD_ADDR: u16 = 0xFF00;
 const SERIAL_START: u16 = 0xFF01;
 const SERIAL_END: u16 = 0xFF02;
 const TIMER_START: u16 = 0xFF04;
@@ -41,6 +43,7 @@ const PPU_REGISTER_END: u16 = 0xFF4B;
 pub struct Bus {
     cartridge: Cartridge,
     ppu: Ppu,
+    joypad: Joypad,
     serial: Serial,
     timer: Timer,
     wram: [u8; WRAM_SIZE],
@@ -56,6 +59,7 @@ impl Bus {
         Self {
             cartridge,
             ppu: Ppu::new(),
+            joypad: Joypad::new(),
             serial: Serial::new(),
             timer: Timer::new(),
             wram: [0; WRAM_SIZE],
@@ -76,6 +80,7 @@ impl Bus {
             WRAM_START..=WRAM_END => self.wram[wram_index(address)],
             OAM_START..=OAM_END => self.ppu.read_oam(address - OAM_START),
             UNUSABLE_OAM_START..=UNUSABLE_OAM_END => 0xFF,
+            JOYPAD_ADDR => self.joypad.read(),
             SERIAL_START..=SERIAL_END => self.serial.read(address),
             TIMER_START..=TIMER_END => self.timer.read(address),
             INTERRUPT_FLAGS_ADDR => self.interrupt_flags.read_if(),
@@ -96,6 +101,7 @@ impl Bus {
             WRAM_START..=WRAM_END => self.wram[wram_index(address)] = value,
             OAM_START..=OAM_END => self.ppu.write_oam(address - OAM_START, value),
             UNUSABLE_OAM_START..=UNUSABLE_OAM_END => {}
+            JOYPAD_ADDR => self.joypad.write(value),
             SERIAL_START..=SERIAL_END => self.serial.write(address, value),
             TIMER_START..=TIMER_END => self.timer.write(address, value),
             INTERRUPT_FLAGS_ADDR => self.interrupt_flags.write_if(value),
@@ -152,6 +158,12 @@ impl Bus {
     /// Drains collected serial debug output.
     pub fn take_serial_output(&mut self) -> Vec<u8> {
         self.serial.take_output()
+    }
+
+    /// Updates one joypad button state and requests an interrupt on new presses.
+    pub fn set_button(&mut self, button: Button, pressed: bool) {
+        self.joypad
+            .set_button(button, pressed, &mut self.interrupt_flags);
     }
 
     /// Returns the raw interrupt flags register storage.

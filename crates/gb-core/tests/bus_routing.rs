@@ -1,7 +1,7 @@
 mod common;
 
 use common::minimal_rom_with_entry_point;
-use gb_core::{bus::Bus, cartridge::Cartridge, cpu::TCycles, interrupt::Interrupt};
+use gb_core::{bus::Bus, cartridge::Cartridge, cpu::TCycles, interrupt::Interrupt, joypad::Button};
 
 const TITLE_START: usize = 0x0134;
 const CARTRIDGE_TYPE_ADDR: usize = 0x0147;
@@ -191,6 +191,25 @@ fn serial_registers_are_routed_and_output_can_be_drained() {
     assert!(
         bus.serial_output().is_empty(),
         "take_serial_output should drain the buffer"
+    );
+}
+
+#[test]
+fn joypad_register_routes_selected_active_low_buttons_and_interrupts() {
+    let mut bus = test_bus_with_rom_byte(0x0100, 0x42);
+
+    bus.write8(0xFF00, 0x10);
+    bus.set_button(Button::A, true);
+
+    assert_eq!(
+        bus.read8(0xFF00) & 0x0F,
+        0b1110,
+        "FF00 should expose selected action buttons as active-low bits"
+    );
+    assert_eq!(
+        bus.interrupt_flags() & Interrupt::Joypad.mask(),
+        Interrupt::Joypad.mask(),
+        "new button presses should request the Joypad interrupt"
     );
 }
 

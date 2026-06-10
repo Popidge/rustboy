@@ -152,6 +152,32 @@ fn timer_registers_are_routed_and_tick_requests_timer_interrupt() {
 }
 
 #[test]
+fn serial_registers_are_routed_and_output_can_be_drained() {
+    let mut bus = test_bus_with_rom_byte(0x0100, 0x42);
+
+    bus.write8(0xFF01, b'O');
+    bus.write8(0xFF02, 0x81);
+    bus.write8(0xFF01, b'K');
+    bus.write8(0xFF02, 0x81);
+
+    assert_eq!(bus.read8(0xFF01), b'K', "SB should keep the latest byte");
+    assert_eq!(
+        bus.serial_output(),
+        b"OK",
+        "SC transfer starts should expose serial output"
+    );
+    assert_eq!(
+        bus.take_serial_output(),
+        b"OK",
+        "take should return serial output"
+    );
+    assert!(
+        bus.serial_output().is_empty(),
+        "take_serial_output should drain the buffer"
+    );
+}
+
+#[test]
 fn write8_ignores_rom_for_rom_only_cartridge() {
     let mut bus = test_bus_with_rom_byte(0x0100, 0x42);
 

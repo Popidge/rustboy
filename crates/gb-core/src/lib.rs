@@ -4,6 +4,7 @@ pub mod bus;
 pub mod cartridge;
 pub mod cpu;
 pub mod interrupt;
+pub mod serial;
 pub mod timer;
 
 /// Placeholder type for the emulator core.

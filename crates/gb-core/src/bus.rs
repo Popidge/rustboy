@@ -8,6 +8,7 @@ use crate::{
     cartridge::Cartridge,
     cpu::TCycles,
     interrupt::{Interrupt, InterruptFlags},
+    serial::Serial,
     timer::Timer,
 };
 
@@ -21,6 +22,8 @@ const HRAM_SIZE: usize = 0x007F;
 
 const INTERRUPT_ENABLE_ADDR: u16 = 0xFFFF;
 const INTERRUPT_FLAGS_ADDR: u16 = 0xFF0F;
+const SERIAL_START: u16 = 0xFF01;
+const SERIAL_END: u16 = 0xFF02;
 const TIMER_START: u16 = 0xFF04;
 const TIMER_END: u16 = 0xFF07;
 
@@ -28,6 +31,7 @@ const TIMER_END: u16 = 0xFF07;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Bus {
     cartridge: Cartridge,
+    serial: Serial,
     timer: Timer,
     wram: [u8; WRAM_SIZE],
     hram: [u8; HRAM_SIZE],
@@ -41,6 +45,7 @@ impl Bus {
     pub fn new(cartridge: Cartridge) -> Self {
         Self {
             cartridge,
+            serial: Serial::new(),
             timer: Timer::new(),
             wram: [0; WRAM_SIZE],
             hram: [0; HRAM_SIZE],
@@ -57,6 +62,7 @@ impl Bus {
         match address {
             0x0000..=0x7FFF => self.cartridge.read_rom(address).unwrap_or(0xFF),
             WRAM_START..=WRAM_END => self.wram[wram_index(address)],
+            SERIAL_START..=SERIAL_END => self.serial.read(address),
             TIMER_START..=TIMER_END => self.timer.read(address),
             INTERRUPT_FLAGS_ADDR => self.interrupt_flags.read_if(),
             HRAM_START..=HRAM_END => self.hram[hram_index(address)],
@@ -72,6 +78,7 @@ impl Bus {
         match address {
             0x0000..=0x7FFF => {}
             WRAM_START..=WRAM_END => self.wram[wram_index(address)] = value,
+            SERIAL_START..=SERIAL_END => self.serial.write(address, value),
             TIMER_START..=TIMER_END => self.timer.write(address, value),
             INTERRUPT_FLAGS_ADDR => self.interrupt_flags.write_if(value),
             HRAM_START..=HRAM_END => self.hram[hram_index(address)] = value,
@@ -100,6 +107,17 @@ impl Bus {
     /// Advances bus-owned hardware components by the given T-cycles.
     pub fn tick(&mut self, cycles: TCycles) {
         self.timer.tick(cycles, &mut self.interrupt_flags);
+    }
+
+    /// Returns collected serial debug output without draining it.
+    #[must_use]
+    pub fn serial_output(&self) -> &[u8] {
+        self.serial.output()
+    }
+
+    /// Drains collected serial debug output.
+    pub fn take_serial_output(&mut self) -> Vec<u8> {
+        self.serial.take_output()
     }
 
     /// Returns the raw interrupt flags register storage.

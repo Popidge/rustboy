@@ -2983,4 +2983,40 @@ mod tests {
             "STOP should consume its padding byte"
         );
     }
+
+    #[test]
+    fn cpu_can_emit_serial_test_output_through_ldh_instructions() {
+        let mut bus = bus_with_bytes(&[
+            (0x0100, 0x3E),
+            (0x0101, b'O'),
+            (0x0102, 0xE0),
+            (0x0103, 0x01),
+            (0x0104, 0x3E),
+            (0x0105, 0x81),
+            (0x0106, 0xE0),
+            (0x0107, 0x02),
+            (0x0108, 0x3E),
+            (0x0109, b'K'),
+            (0x010A, 0xE0),
+            (0x010B, 0x01),
+            (0x010C, 0x3E),
+            (0x010D, 0x81),
+            (0x010E, 0xE0),
+            (0x010F, 0x02),
+        ]);
+        let mut cpu = Cpu::new_dmg_post_boot();
+
+        for _ in 0..8 {
+            let cycles = cpu
+                .step(&mut bus)
+                .expect("serial test ROM opcodes should run");
+            bus.tick(cycles);
+        }
+
+        assert_eq!(
+            bus.take_serial_output(),
+            b"OK",
+            "LDH writes to SB/SC should collect serial text output"
+        );
+    }
 }

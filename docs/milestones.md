@@ -1,5 +1,42 @@
 # Milestones
 
+## 0019: Implement serial debug output
+
+Date: 2026-06-10
+
+Status: Complete
+
+### Goal
+
+Implement roadmap Stage 12 by adding serial registers, exposing collected serial bytes from core, and printing serial text from the desktop CLI runner.
+
+### Changes
+
+- Added a minimal `Serial` component with `SB` and `SC` register behavior.
+- Routed serial registers at `0xFF01..=0xFF02` through `Bus`.
+- Added `Bus::serial_output` and `Bus::take_serial_output`.
+- Added `gb-desktop <rom.gb> --serial-steps N` to execute a bounded number of CPU steps and print collected serial text.
+
+### Tests
+
+- `cargo fmt`
+- `cargo test`
+- `cargo clippy --all-targets --all-features`
+- `cargo run -p gb-desktop --quiet -- <generated serial smoke ROM> --serial-steps 8`
+- Added serial unit tests, bus routing tests, and a CPU ROM-style test that emits `OK` through `LDH` writes to `SB`/`SC`.
+
+### Decisions
+
+- Kept serial output buffered in `gb-core`; printing belongs to `gb-desktop`.
+- Cleared the SC transfer-start bit immediately after capturing `SB` for this minimal debug implementation.
+- Used an opt-in bounded CLI step count instead of an open-ended runner.
+- Added no dependencies.
+
+### Notes
+
+- The generated CLI smoke ROM printed `Serial: OK`.
+- A fuller ROM runner is still left to Stage 13.
+
 ## 0018: Implement timers
 
 Date: 2026-06-10

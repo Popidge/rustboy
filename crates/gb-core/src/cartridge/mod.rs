@@ -10,13 +10,24 @@ use std::{error::Error, fmt};
 
 const ROM_ADDRESS_END: u16 = 0x7FFF;
 const ROM_BANK_SIZE: usize = 0x4000;
+const RAM_BANK_SIZE: usize = 0x2000;
 
 /// A loaded Game Boy cartridge ROM.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Cartridge {
     rom: Vec<u8>,
+    ram: Vec<u8>,
     header: CartridgeHeader,
-    selected_rom_bank: u8,
+    lower_rom_bank_bits: u8,
+    upper_bank_bits: u8,
+    banking_mode: BankingMode,
+    ram_enabled: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BankingMode {
+    Rom,
+    Ram,
 }
 
 /// Errors that can occur while loading cartridge bytes.
@@ -71,8 +82,12 @@ impl Cartridge {
 
         Ok(Self {
             rom: bytes,
+            ram: vec![0; header.ram_size().bytes()],
             header,
-            selected_rom_bank: 1,
+            lower_rom_bank_bits: 1,
+            upper_bank_bits: 0,
+            banking_mode: BankingMode::Rom,
+            ram_enabled: false,
         })
     }
 
@@ -125,8 +140,11 @@ impl Cartridge {
         }
 
         let index = match (self.header.cartridge_type(), address) {
-            (CartridgeType::Mbc1, 0x4000..=0x7FFF) => {
-                usize::from(self.selected_rom_bank) * ROM_BANK_SIZE + usize::from(address - 0x4000)
+            (cartridge_type, 0x0000..=0x3FFF) if cartridge_type.is_mbc1() => {
+                self.mbc1_fixed_bank() * ROM_BANK_SIZE + usize::from(address)
+            }
+            (cartridge_type, 0x4000..=0x7FFF) if cartridge_type.is_mbc1() => {
+                self.mbc1_switchable_bank() * ROM_BANK_SIZE + usize::from(address - 0x4000)
             }
             _ => usize::from(address),
         };
@@ -139,19 +157,121 @@ impl Cartridge {
 
     /// Handles writes to cartridge control registers.
     ///
-    /// ROM-only cartridges ignore these writes. MBC1 support is intentionally
-    /// minimal for now: only the lower five ROM bank bits are handled.
+    /// ROM-only cartridges ignore these writes.
     pub fn write_rom(&mut self, address: u16, value: u8) {
-        if self.header.cartridge_type() != CartridgeType::Mbc1 {
+        if !self.header.cartridge_type().is_mbc1() {
             return;
         }
 
-        if let 0x2000..=0x3FFF = address {
-            let bank = value & 0x1F;
-            self.selected_rom_bank = if bank == 0 { 1 } else { bank };
+        match address {
+            0x0000..=0x1FFF => self.ram_enabled = value & 0x0F == 0x0A,
+            0x2000..=0x3FFF => {
+                let bank = value & 0x1F;
+                self.lower_rom_bank_bits = if bank == 0 { 1 } else { bank };
+            }
+            0x4000..=0x5FFF => self.upper_bank_bits = value & 0x03,
+            0x6000..=0x7FFF => {
+                self.banking_mode = if value & 0x01 == 0 {
+                    BankingMode::Rom
+                } else {
+                    BankingMode::Ram
+                };
+            }
+            _ => {}
+        }
+    }
+
+    #[must_use]
+    pub fn read_ram(&self, address: u16) -> u8 {
+        if !(0xA000..=0xBFFF).contains(&address) || !self.ram_enabled || self.ram.is_empty() {
+            return 0xFF;
+        }
+
+        let index = self.selected_ram_bank() * RAM_BANK_SIZE + usize::from(address - 0xA000);
+        self.ram.get(index).copied().unwrap_or(0xFF)
+    }
+
+    pub fn write_ram(&mut self, address: u16, value: u8) {
+        if !(0xA000..=0xBFFF).contains(&address) || !self.ram_enabled || self.ram.is_empty() {
+            return;
+        }
+
+        let index = self.selected_ram_bank() * RAM_BANK_SIZE + usize::from(address - 0xA000);
+        if let Some(byte) = self.ram.get_mut(index) {
+            *byte = value;
+        }
+    }
+
+    #[must_use]
+    pub fn save_ram(&self) -> Option<&[u8]> {
+        self.header
+            .cartridge_type()
+            .has_battery()
+            .then_some(self.ram.as_slice())
+            .filter(|ram| !ram.is_empty())
+    }
+
+    /// Restores external cartridge RAM from save data.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SaveRamError::NoExternalRam`] when the cartridge has no
+    /// external RAM, or [`SaveRamError::WrongLength`] when the save data does
+    /// not match the cartridge RAM size.
+    pub fn load_save_ram(&mut self, data: &[u8]) -> Result<(), SaveRamError> {
+        if self.ram.is_empty() {
+            return Err(SaveRamError::NoExternalRam);
+        }
+
+        if data.len() != self.ram.len() {
+            return Err(SaveRamError::WrongLength {
+                expected: self.ram.len(),
+                actual: data.len(),
+            });
+        }
+
+        self.ram.copy_from_slice(data);
+        Ok(())
+    }
+
+    fn mbc1_fixed_bank(&self) -> usize {
+        match self.banking_mode {
+            BankingMode::Rom => 0,
+            BankingMode::Ram => usize::from(self.upper_bank_bits) << 5,
+        }
+    }
+
+    fn mbc1_switchable_bank(&self) -> usize {
+        (usize::from(self.upper_bank_bits) << 5) | usize::from(self.lower_rom_bank_bits)
+    }
+
+    fn selected_ram_bank(&self) -> usize {
+        match self.banking_mode {
+            BankingMode::Rom => 0,
+            BankingMode::Ram => usize::from(self.upper_bank_bits),
         }
     }
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SaveRamError {
+    NoExternalRam,
+    WrongLength { expected: usize, actual: usize },
+}
+
+impl fmt::Display for SaveRamError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NoExternalRam => formatter.write_str("cartridge has no external RAM"),
+            Self::WrongLength { expected, actual } => write!(
+                formatter,
+                "save RAM length mismatch: expected {expected} bytes, got {actual}"
+            ),
+        }
+    }
+}
+
+impl Error for SaveRamError {}
 
 impl fmt::Display for CartridgeError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -193,7 +313,7 @@ impl Error for CartridgeReadError {}
 mod tests {
     use super::{
         header::calculate_header_checksum, Cartridge, CartridgeError, CartridgeReadError,
-        ROM_BANK_SIZE,
+        SaveRamError, RAM_BANK_SIZE, ROM_BANK_SIZE,
     };
 
     const ROM_SIZE: usize = 32 * 1024;
@@ -232,12 +352,12 @@ mod tests {
     }
 
     fn fake_mbc1_rom_with_banks() -> Vec<u8> {
-        let mut rom = fake_rom(b"MBC1BANK", 0x01, 0x01, 0x00);
-        rom.resize(4 * ROM_BANK_SIZE, 0);
+        let mut rom = fake_rom(b"MBC1BANK", 0x03, 0x05, 0x03);
+        rom.resize(64 * ROM_BANK_SIZE, 0);
+        for bank in 0..64 {
+            rom[bank * ROM_BANK_SIZE] = u8::try_from(bank).expect("test bank fits in u8");
+        }
         rom[0x0150] = 0x11;
-        rom[ROM_BANK_SIZE] = 0x33;
-        rom[2 * ROM_BANK_SIZE] = 0x44;
-        rom[3 * ROM_BANK_SIZE] = 0x55;
         rom[HEADER_CHECKSUM_ADDR] =
             calculate_header_checksum(&rom).expect("fake ROM should contain full header");
         rom
@@ -405,7 +525,7 @@ mod tests {
         );
         assert_eq!(
             cartridge.read_rom(0x4000),
-            Ok(0x33),
+            Ok(0x01),
             "switchable region should default to bank 1"
         );
 
@@ -413,7 +533,7 @@ mod tests {
 
         assert_eq!(
             cartridge.read_rom(0x4000),
-            Ok(0x33),
+            Ok(0x01),
             "MBC1 bank select value 0 should map to bank 1"
         );
 
@@ -421,7 +541,7 @@ mod tests {
 
         assert_eq!(
             cartridge.read_rom(0x4000),
-            Ok(0x44),
+            Ok(0x02),
             "switchable region should read from the selected ROM bank"
         );
 
@@ -429,8 +549,128 @@ mod tests {
 
         assert_eq!(
             cartridge.read_rom(0x4000),
-            Ok(0x55),
+            Ok(0x03),
             "MBC1 should support selecting another available lower-bit ROM bank"
+        );
+    }
+
+    #[test]
+    fn mbc1_uses_upper_rom_bank_bits_in_rom_banking_mode() {
+        let rom = fake_mbc1_rom_with_banks();
+        let mut cartridge = Cartridge::from_bytes(rom).expect("MBC1 header should parse");
+
+        cartridge.write_rom(0x2000, 0x02);
+        cartridge.write_rom(0x4000, 0x01);
+
+        assert_eq!(
+            cartridge.read_rom(0x0000),
+            Ok(0x00),
+            "bank 0 region should stay fixed while MBC1 is in ROM banking mode"
+        );
+        assert_eq!(
+            cartridge.read_rom(0x4000),
+            Ok(0x22),
+            "switchable region should combine upper bits with lower ROM bank bits"
+        );
+    }
+
+    #[test]
+    fn mbc1_ram_banking_mode_remaps_bank_zero_region() {
+        let rom = fake_mbc1_rom_with_banks();
+        let mut cartridge = Cartridge::from_bytes(rom).expect("MBC1 header should parse");
+
+        cartridge.write_rom(0x4000, 0x01);
+        cartridge.write_rom(0x6000, 0x01);
+
+        assert_eq!(
+            cartridge.read_rom(0x0000),
+            Ok(0x20),
+            "MBC1 RAM banking mode should apply upper bank bits to the 0000-3FFF ROM region"
+        );
+    }
+
+    #[test]
+    fn mbc1_external_ram_requires_enable() {
+        let rom = fake_mbc1_rom_with_banks();
+        let mut cartridge = Cartridge::from_bytes(rom).expect("MBC1 header should parse");
+
+        cartridge.write_ram(0xA000, 0x42);
+        assert_eq!(
+            cartridge.read_ram(0xA000),
+            0xFF,
+            "disabled external RAM should read as open bus"
+        );
+
+        cartridge.write_rom(0x0000, 0x0A);
+        cartridge.write_ram(0xA000, 0x42);
+
+        assert_eq!(
+            cartridge.read_ram(0xA000),
+            0x42,
+            "enabled external RAM should store written bytes"
+        );
+    }
+
+    #[test]
+    fn mbc1_ram_banking_selects_external_ram_bank() {
+        let rom = fake_mbc1_rom_with_banks();
+        let mut cartridge = Cartridge::from_bytes(rom).expect("MBC1 header should parse");
+
+        cartridge.write_rom(0x0000, 0x0A);
+        cartridge.write_rom(0x6000, 0x01);
+        cartridge.write_rom(0x4000, 0x00);
+        cartridge.write_ram(0xA000, 0x10);
+        cartridge.write_rom(0x4000, 0x01);
+        cartridge.write_ram(0xA000, 0x20);
+
+        cartridge.write_rom(0x4000, 0x00);
+        assert_eq!(cartridge.read_ram(0xA000), 0x10);
+        cartridge.write_rom(0x4000, 0x01);
+        assert_eq!(cartridge.read_ram(0xA000), 0x20);
+    }
+
+    #[test]
+    fn battery_backed_ram_can_be_extracted_and_restored() {
+        let rom = fake_mbc1_rom_with_banks();
+        let mut cartridge = Cartridge::from_bytes(rom.clone()).expect("MBC1 header should parse");
+        cartridge.write_rom(0x0000, 0x0A);
+        cartridge.write_ram(0xA000, 0x5A);
+
+        let save = cartridge
+            .save_ram()
+            .expect("battery-backed MBC1 RAM should be exposed")
+            .to_vec();
+
+        assert_eq!(save.len(), 4 * RAM_BANK_SIZE);
+
+        let mut restored = Cartridge::from_bytes(rom).expect("MBC1 header should parse");
+        restored
+            .load_save_ram(&save)
+            .expect("matching save RAM length should load");
+        restored.write_rom(0x0000, 0x0A);
+
+        assert_eq!(
+            restored.read_ram(0xA000),
+            0x5A,
+            "loaded save RAM should be visible through cartridge RAM reads"
+        );
+    }
+
+    #[test]
+    fn save_ram_restore_rejects_wrong_length() {
+        let rom = fake_mbc1_rom_with_banks();
+        let mut cartridge = Cartridge::from_bytes(rom).expect("MBC1 header should parse");
+
+        let error = cartridge
+            .load_save_ram(&[0x00])
+            .expect_err("wrong save RAM length should be rejected");
+
+        assert_eq!(
+            error,
+            SaveRamError::WrongLength {
+                expected: 4 * RAM_BANK_SIZE,
+                actual: 1
+            }
         );
     }
 

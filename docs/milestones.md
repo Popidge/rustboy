@@ -1,5 +1,40 @@
 # Milestones
 
+## 0029: Complete MBC1 cartridge support
+
+Date: 2026-06-10
+
+Status: Complete
+
+### Goal
+
+Complete roadmap Stage 21 by supporting MBC1 ROM banking, external RAM banking, and battery-backed save RAM persistence.
+
+### Changes
+
+- Added MBC1 RAM and battery cartridge type decoding.
+- Implemented MBC1 RAM enable, lower ROM bank select, upper bank bits, ROM/RAM banking mode, external RAM reads, and external RAM writes.
+- Routed `0xA000..=0xBFFF` bus accesses to cartridge RAM.
+- Exposed save RAM extraction/restoration through `Cartridge`, `Bus`, and `GameBoy`.
+- Added `.sav` sidecar load/save support in `gb-desktop` for battery-backed cartridges.
+
+### Tests
+
+- `cargo fmt`
+- `cargo test`
+- `cargo clippy --all-targets --all-features`
+- Added cartridge tests for MBC1 upper ROM bits, bank-zero remapping in RAM mode, RAM enable, RAM bank switching, and save RAM restore validation.
+
+### Decisions
+
+- Kept filesystem persistence in `gb-desktop`; `gb-core` only exposes save RAM bytes.
+- Kept the existing `Cartridge` struct shape for this stage instead of a broad enum refactor, while modelling MBC1 control registers explicitly.
+- Added no dependencies.
+
+### Notes
+
+- Stage 22 will add MBC3/MBC5 and extended cartridge types, including RTC handling.
+
 ## 0028: Enforce desktop frame pacing
 
 Date: 2026-06-10

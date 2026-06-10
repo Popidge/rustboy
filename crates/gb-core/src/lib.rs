@@ -10,7 +10,7 @@ pub mod serial;
 pub mod timer;
 
 use bus::Bus;
-use cartridge::{Cartridge, CartridgeError};
+use cartridge::{Cartridge, CartridgeError, SaveRamError};
 use cpu::{Cpu, CpuError, TCycles};
 use joypad::Button;
 use ppu::FRAMEBUFFER_PIXELS;
@@ -88,6 +88,21 @@ impl GameBoy {
     /// Updates one joypad button state.
     pub fn set_button(&mut self, button: Button, pressed: bool) {
         self.bus.set_button(button, pressed);
+    }
+
+    #[must_use]
+    pub fn save_ram(&self) -> Option<&[u8]> {
+        self.bus.save_ram()
+    }
+
+    /// Restores external cartridge RAM from save data.
+    ///
+    /// # Errors
+    ///
+    /// Returns a save RAM error when the data cannot be applied to the loaded
+    /// cartridge.
+    pub fn load_save_ram(&mut self, data: &[u8]) -> Result<(), SaveRamError> {
+        self.bus.load_save_ram(data)
     }
 }
 

@@ -110,6 +110,8 @@ pub(crate) fn calculate_header_checksum(rom: &[u8]) -> Result<u8, CartridgeError
 pub enum CartridgeType {
     RomOnly,
     Mbc1,
+    Mbc1Ram,
+    Mbc1RamBattery,
     Unsupported(u8),
 }
 
@@ -119,8 +121,22 @@ impl CartridgeType {
         match code {
             0x00 => Self::RomOnly,
             0x01 => Self::Mbc1,
+            0x02 => Self::Mbc1Ram,
+            0x03 => Self::Mbc1RamBattery,
             unsupported => Self::Unsupported(unsupported),
         }
+    }
+}
+
+impl CartridgeType {
+    #[must_use]
+    pub fn is_mbc1(self) -> bool {
+        matches!(self, Self::Mbc1 | Self::Mbc1Ram | Self::Mbc1RamBattery)
+    }
+
+    #[must_use]
+    pub fn has_battery(self) -> bool {
+        matches!(self, Self::Mbc1RamBattery)
     }
 }
 
@@ -129,6 +145,8 @@ impl fmt::Display for CartridgeType {
         match self {
             Self::RomOnly => formatter.write_str("ROM ONLY"),
             Self::Mbc1 => formatter.write_str("MBC1"),
+            Self::Mbc1Ram => formatter.write_str("MBC1+RAM"),
+            Self::Mbc1RamBattery => formatter.write_str("MBC1+RAM+BATTERY"),
             Self::Unsupported(code) => write!(formatter, "Unsupported (0x{code:02X})"),
         }
     }
@@ -216,6 +234,18 @@ impl RamSize {
             0x04 => Self::KiB128,
             0x05 => Self::KiB64,
             unknown => Self::Unknown(unknown),
+        }
+    }
+
+    #[must_use]
+    pub fn bytes(self) -> usize {
+        match self {
+            Self::None | Self::Unknown(_) => 0,
+            Self::KiB2 => 2 * 1024,
+            Self::KiB8 => 8 * 1024,
+            Self::KiB32 => 32 * 1024,
+            Self::KiB64 => 64 * 1024,
+            Self::KiB128 => 128 * 1024,
         }
     }
 }

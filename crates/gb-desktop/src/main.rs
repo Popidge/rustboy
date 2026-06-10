@@ -11,6 +11,7 @@ use std::{
     env,
     error::Error,
     fs,
+    path::{Path, PathBuf},
     time::{Duration, Instant},
 };
 use winit::{
@@ -40,7 +41,8 @@ fn main() -> Result<(), Box<dyn Error>> {
         return Ok(());
     };
 
-    let rom = fs::read(rom_path)?;
+    let rom_path = PathBuf::from(rom_path);
+    let rom = fs::read(&rom_path)?;
     let cartridge = Cartridge::from_bytes(rom)?;
 
     println!("Title: {}", cartridge.title());
@@ -51,7 +53,10 @@ fn main() -> Result<(), Box<dyn Error>> {
     if let Some(steps) = options.serial_steps {
         run_serial_output(cartridge, steps)?;
     } else {
-        run_window(DisplaySource::Emulator(Box::new(GameBoy::new(cartridge))))?;
+        let save_path = save_path_for_rom(&rom_path);
+        let mut game_boy = GameBoy::new(cartridge);
+        load_save_if_present(&mut game_boy, &save_path)?;
+        run_window(DisplaySource::Emulator(Box::new(game_boy), save_path))?;
     }
 
     Ok(())
@@ -117,14 +122,14 @@ fn run_window(source: DisplaySource) -> Result<(), Box<dyn Error>> {
 
 #[derive(Debug)]
 enum DisplaySource {
-    Emulator(Box<GameBoy>),
+    Emulator(Box<GameBoy>, PathBuf),
     Demo(Box<DemoFrame>),
 }
 
 impl DisplaySource {
     fn next_frame(&mut self) -> Option<&[u32]> {
         match self {
-            Self::Emulator(game_boy) => {
+            Self::Emulator(game_boy, _) => {
                 if let Err(error) = game_boy.run_until_frame() {
                     eprintln!("{error}");
                     return None;
@@ -137,8 +142,20 @@ impl DisplaySource {
     }
 
     fn set_button(&mut self, button: Button, pressed: bool) {
-        if let Self::Emulator(game_boy) = self {
+        if let Self::Emulator(game_boy, _) = self {
             game_boy.set_button(button, pressed);
+        }
+    }
+
+    fn save_battery_ram(&self) {
+        let Self::Emulator(game_boy, save_path) = self else {
+            return;
+        };
+
+        if let Some(ram) = game_boy.save_ram() {
+            if let Err(error) = fs::write(save_path, ram) {
+                eprintln!("failed to save RAM to {}: {error}", save_path.display());
+            }
         }
     }
 }
@@ -254,7 +271,10 @@ impl ApplicationHandler for DesktopApp {
         event: WindowEvent,
     ) {
         match event {
-            WindowEvent::CloseRequested => event_loop.exit(),
+            WindowEvent::CloseRequested => {
+                self.source.save_battery_ram();
+                event_loop.exit();
+            }
             WindowEvent::RedrawRequested => self.redraw(event_loop),
             WindowEvent::KeyboardInput { event, .. } => {
                 if let Some(button) = key_to_button(event.physical_key) {
@@ -284,6 +304,20 @@ impl ApplicationHandler for DesktopApp {
             }
         }
     }
+}
+
+fn save_path_for_rom(rom_path: &Path) -> PathBuf {
+    rom_path.with_extension("sav")
+}
+
+fn load_save_if_present(game_boy: &mut GameBoy, save_path: &Path) -> Result<(), Box<dyn Error>> {
+    if game_boy.save_ram().is_none() || !save_path.exists() {
+        return Ok(());
+    }
+
+    let save = fs::read(save_path)?;
+    game_boy.load_save_ram(&save)?;
+    Ok(())
 }
 
 #[derive(Debug)]

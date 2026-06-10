@@ -31,6 +31,8 @@ const TIMER_START: u16 = 0xFF04;
 const TIMER_END: u16 = 0xFF07;
 const VRAM_START: u16 = 0x8000;
 const VRAM_END: u16 = 0x9FFF;
+const CARTRIDGE_RAM_START: u16 = 0xA000;
+const CARTRIDGE_RAM_END: u16 = 0xBFFF;
 const OAM_START: u16 = 0xFE00;
 const OAM_END: u16 = 0xFE9F;
 const OAM_SIZE: u16 = 0x00A0;
@@ -79,6 +81,7 @@ impl Bus {
         match address {
             0x0000..=0x7FFF => self.cartridge.read_rom(address).unwrap_or(0xFF),
             VRAM_START..=VRAM_END => self.ppu.read_vram(address - VRAM_START),
+            CARTRIDGE_RAM_START..=CARTRIDGE_RAM_END => self.cartridge.read_ram(address),
             WRAM_START..=WRAM_END => self.wram[wram_index(address)],
             OAM_START..=OAM_END => self.ppu.read_oam(address - OAM_START),
             UNUSABLE_OAM_START..=UNUSABLE_OAM_END => 0xFF,
@@ -100,6 +103,7 @@ impl Bus {
         match address {
             0x0000..=0x7FFF => self.cartridge.write_rom(address, value),
             VRAM_START..=VRAM_END => self.ppu.write_vram(address - VRAM_START, value),
+            CARTRIDGE_RAM_START..=CARTRIDGE_RAM_END => self.cartridge.write_ram(address, value),
             WRAM_START..=WRAM_END => self.wram[wram_index(address)] = value,
             OAM_START..=OAM_END => self.ppu.write_oam(address - OAM_START, value),
             UNUSABLE_OAM_START..=UNUSABLE_OAM_END => {}
@@ -167,6 +171,21 @@ impl Bus {
     pub fn set_button(&mut self, button: Button, pressed: bool) {
         self.joypad
             .set_button(button, pressed, &mut self.interrupt_flags);
+    }
+
+    #[must_use]
+    pub fn save_ram(&self) -> Option<&[u8]> {
+        self.cartridge.save_ram()
+    }
+
+    /// Restores external cartridge RAM from save data.
+    ///
+    /// # Errors
+    ///
+    /// Returns a save RAM error when the data cannot be applied to the loaded
+    /// cartridge.
+    pub fn load_save_ram(&mut self, data: &[u8]) -> Result<(), crate::cartridge::SaveRamError> {
+        self.cartridge.load_save_ram(data)
     }
 
     /// Returns the raw interrupt flags register storage.

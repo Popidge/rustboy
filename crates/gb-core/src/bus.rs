@@ -6,7 +6,9 @@
 
 use crate::{
     cartridge::Cartridge,
+    cpu::TCycles,
     interrupt::{Interrupt, InterruptFlags},
+    timer::Timer,
 };
 
 const WRAM_START: u16 = 0xC000;
@@ -19,11 +21,14 @@ const HRAM_SIZE: usize = 0x007F;
 
 const INTERRUPT_ENABLE_ADDR: u16 = 0xFFFF;
 const INTERRUPT_FLAGS_ADDR: u16 = 0xFF0F;
+const TIMER_START: u16 = 0xFF04;
+const TIMER_END: u16 = 0xFF07;
 
 /// CPU-facing memory bus.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Bus {
     cartridge: Cartridge,
+    timer: Timer,
     wram: [u8; WRAM_SIZE],
     hram: [u8; HRAM_SIZE],
     interrupt_enable: InterruptFlags,
@@ -36,6 +41,7 @@ impl Bus {
     pub fn new(cartridge: Cartridge) -> Self {
         Self {
             cartridge,
+            timer: Timer::new(),
             wram: [0; WRAM_SIZE],
             hram: [0; HRAM_SIZE],
             interrupt_enable: InterruptFlags::default(),
@@ -51,6 +57,7 @@ impl Bus {
         match address {
             0x0000..=0x7FFF => self.cartridge.read_rom(address).unwrap_or(0xFF),
             WRAM_START..=WRAM_END => self.wram[wram_index(address)],
+            TIMER_START..=TIMER_END => self.timer.read(address),
             INTERRUPT_FLAGS_ADDR => self.interrupt_flags.read_if(),
             HRAM_START..=HRAM_END => self.hram[hram_index(address)],
             INTERRUPT_ENABLE_ADDR => self.interrupt_enable.raw(),
@@ -65,6 +72,7 @@ impl Bus {
         match address {
             0x0000..=0x7FFF => {}
             WRAM_START..=WRAM_END => self.wram[wram_index(address)] = value,
+            TIMER_START..=TIMER_END => self.timer.write(address, value),
             INTERRUPT_FLAGS_ADDR => self.interrupt_flags.write_if(value),
             HRAM_START..=HRAM_END => self.hram[hram_index(address)] = value,
             INTERRUPT_ENABLE_ADDR => self.interrupt_enable.set_raw(value),
@@ -87,6 +95,11 @@ impl Bus {
 
         self.write8(address, low);
         self.write8(address.wrapping_add(1), high);
+    }
+
+    /// Advances bus-owned hardware components by the given T-cycles.
+    pub fn tick(&mut self, cycles: TCycles) {
+        self.timer.tick(cycles, &mut self.interrupt_flags);
     }
 
     /// Returns the raw interrupt flags register storage.

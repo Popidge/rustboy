@@ -1,5 +1,40 @@
 # Milestones
 
+## 0018: Implement timers
+
+Date: 2026-06-10
+
+Status: Complete
+
+### Goal
+
+Implement roadmap Stage 11 by adding DIV, TIMA, TMA, TAC, bus ticking, and Timer interrupt requests.
+
+### Changes
+
+- Added a `Timer` component with `DIV`, `TIMA`, `TMA`, and `TAC` register behavior.
+- Routed timer registers at `0xFF04..=0xFF07` through `Bus`.
+- Added `Bus::tick(TCycles)` to advance bus-owned hardware.
+- Reloaded `TIMA` from `TMA` and requested the Timer interrupt on overflow.
+
+### Tests
+
+- `cargo fmt`
+- `cargo test`
+- `cargo clippy --all-targets --all-features`
+- Added timer unit tests for DIV reset/increment, all TAC frequencies, and overflow interrupt behavior.
+- Added a bus integration test for timer register routing and interrupt requests through `Bus::tick`.
+
+### Decisions
+
+- Used T-cycles for all timer periods: 1024, 16, 64, and 256.
+- Implemented immediate TIMA reload on overflow for this milestone; delayed reload edge cases can be revisited during accuracy work.
+- Added no dependencies.
+
+### Notes
+
+- Serial output is the remaining stage in this goal range.
+
 ## 0017: Implement interrupts and CPU control
 
 Date: 2026-06-10

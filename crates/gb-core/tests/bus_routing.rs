@@ -1,7 +1,7 @@
 mod common;
 
 use common::minimal_rom_with_entry_point;
-use gb_core::{bus::Bus, cartridge::Cartridge, interrupt::Interrupt};
+use gb_core::{bus::Bus, cartridge::Cartridge, cpu::TCycles, interrupt::Interrupt};
 
 const TITLE_START: usize = 0x0134;
 const CARTRIDGE_TYPE_ADDR: usize = 0x0147;
@@ -127,6 +127,27 @@ fn typed_interrupt_helpers_request_clear_and_prioritize_pending_interrupts() {
         bus.pending_interrupt(),
         Some(Interrupt::Joypad),
         "Joypad should remain pending after Timer is cleared"
+    );
+}
+
+#[test]
+fn timer_registers_are_routed_and_tick_requests_timer_interrupt() {
+    let mut bus = test_bus_with_rom_byte(0x0100, 0x42);
+
+    bus.write8(0xFF05, 0xFF);
+    bus.write8(0xFF06, 0x77);
+    bus.write8(0xFF07, 0x05);
+    bus.tick(TCycles(16));
+
+    assert_eq!(
+        bus.read8(0xFF05),
+        0x77,
+        "TIMA overflow should reload TMA through bus ticking"
+    );
+    assert_eq!(
+        bus.interrupt_flags(),
+        Interrupt::Timer.mask(),
+        "TIMA overflow should request Timer interrupt through IF"
     );
 }
 

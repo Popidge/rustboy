@@ -263,6 +263,22 @@ fn oam_reads_and_writes_route_through_ppu_and_unusable_oam_reads_ff() {
 }
 
 #[test]
+fn writing_dma_register_copies_one_oam_page() {
+    let mut bus = test_bus_with_rom_byte(0x0100, 0x42);
+
+    for offset in 0..0x00A0 {
+        let byte = u8::try_from(offset).expect("OAM DMA test offsets fit in u8");
+        bus.write8(0xC000 + offset, byte);
+    }
+
+    bus.write8(0xFF46, 0xC0);
+
+    assert_eq!(bus.read8(0xFE00), 0x00, "DMA should copy OAM byte 0");
+    assert_eq!(bus.read8(0xFE01), 0x01, "DMA should copy OAM byte 1");
+    assert_eq!(bus.read8(0xFE9F), 0x9F, "DMA should copy OAM byte 159");
+}
+
+#[test]
 fn lcd_registers_route_through_ppu() {
     let mut bus = test_bus_with_rom_byte(0x0100, 0x42);
 

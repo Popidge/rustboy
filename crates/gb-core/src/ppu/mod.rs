@@ -219,6 +219,8 @@ impl Ppu {
             let color = self.map_background_color(color_index);
             self.framebuffer[screen_y * SCREEN_WIDTH + screen_x] = color;
         }
+
+        self.render_sprites_on_scanline(line);
     }
 
     fn background_color_index(&self, screen_x: u8, screen_y: u8) -> u8 {
@@ -242,6 +244,82 @@ impl Ppu {
 
     fn map_background_color(&self, color_index: u8) -> u32 {
         let palette_index = usize::from((self.bgp >> (color_index * 2)) & 0x03);
+        DMG_SHADES[palette_index]
+    }
+
+    fn render_sprites_on_scanline(&mut self, line: u8) {
+        if !self.lcdc.sprites_enabled() {
+            return;
+        }
+
+        let sprite_height = self.lcdc.sprite_height();
+        let line_i16 = i16::from(line);
+
+        for sprite_index in (0..40).rev() {
+            let sprite = OamEntry::from_oam(&self.oam[sprite_index * 4..sprite_index * 4 + 4]);
+            let sprite_y = i16::from(sprite.y) - 16;
+
+            if line_i16 < sprite_y || line_i16 >= sprite_y + i16::from(sprite_height) {
+                continue;
+            }
+
+            let row_in_sprite = usize::try_from(line_i16 - sprite_y)
+                .expect("visible sprite row should be non-negative");
+            let tile_row = if sprite.y_flip {
+                usize::from(sprite_height) - 1 - row_in_sprite
+            } else {
+                row_in_sprite
+            };
+            let tile_number = if sprite_height == 16 {
+                sprite.tile_index & 0xFE
+            } else {
+                sprite.tile_index
+            };
+            let tile_number = tile_number.wrapping_add(u8::try_from(tile_row / 8).unwrap_or(0));
+            let row = tile_row % 8;
+            let tile_offset = usize::from(tile_number) * 16;
+            let pixels = decode_tile_row(
+                self.vram[tile_offset + row * 2],
+                self.vram[tile_offset + row * 2 + 1],
+            );
+            let sprite_x = i16::from(sprite.x) - 8;
+
+            for screen_x in 0..SCREEN_WIDTH {
+                let screen_x_i16 = i16::try_from(screen_x).expect("screen width should fit in i16");
+
+                if screen_x_i16 < sprite_x || screen_x_i16 >= sprite_x + 8 {
+                    continue;
+                }
+
+                let column = usize::try_from(screen_x_i16 - sprite_x)
+                    .expect("visible sprite column should be non-negative");
+                let tile_column = if sprite.x_flip { 7 - column } else { column };
+                let color_index = pixels[tile_column];
+
+                if color_index == 0 {
+                    continue;
+                }
+
+                let screen_x_u8 =
+                    u8::try_from(screen_x).expect("screen width is smaller than u8::MAX");
+                let background_index = self.background_color_index(screen_x_u8, line);
+
+                if sprite.bg_priority && background_index != 0 {
+                    continue;
+                }
+
+                self.framebuffer[usize::from(line) * SCREEN_WIDTH + screen_x] =
+                    self.map_object_color(color_index, sprite.palette);
+            }
+        }
+    }
+
+    fn map_object_color(&self, color_index: u8, palette: ObjectPalette) -> u32 {
+        let register = match palette {
+            ObjectPalette::Obp0 => self.obp0,
+            ObjectPalette::Obp1 => self.obp1,
+        };
+        let palette_index = usize::from((register >> (color_index * 2)) & 0x03);
         DMG_SHADES[palette_index]
     }
 }
@@ -298,6 +376,20 @@ impl Lcdc {
     }
 
     #[must_use]
+    fn sprites_enabled(self) -> bool {
+        self.bits & 0x02 != 0
+    }
+
+    #[must_use]
+    fn sprite_height(self) -> u8 {
+        if self.bits & 0x04 != 0 {
+            16
+        } else {
+            8
+        }
+    }
+
+    #[must_use]
     fn tile_data_offset(self, tile_number: u8) -> usize {
         if self.bits & 0x10 != 0 {
             usize::from(tile_number) * 16
@@ -317,6 +409,44 @@ impl Lcdc {
             0x1C00
         } else {
             0x1800
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ObjectPalette {
+    Obp0,
+    Obp1,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OamEntry {
+    pub y: u8,
+    pub x: u8,
+    pub tile_index: u8,
+    pub bg_priority: bool,
+    pub y_flip: bool,
+    pub x_flip: bool,
+    pub palette: ObjectPalette,
+}
+
+impl OamEntry {
+    #[must_use]
+    pub fn from_oam(bytes: &[u8]) -> Self {
+        let flags = bytes.get(3).copied().unwrap_or(0);
+
+        Self {
+            y: bytes.first().copied().unwrap_or(0),
+            x: bytes.get(1).copied().unwrap_or(0),
+            tile_index: bytes.get(2).copied().unwrap_or(0),
+            bg_priority: flags & 0x80 != 0,
+            y_flip: flags & 0x40 != 0,
+            x_flip: flags & 0x20 != 0,
+            palette: if flags & 0x10 != 0 {
+                ObjectPalette::Obp1
+            } else {
+                ObjectPalette::Obp0
+            },
         }
     }
 }
@@ -348,7 +478,10 @@ pub fn decode_tile(bytes: &[u8; 16]) -> [[u8; 8]; 8] {
 
 #[cfg(test)]
 mod tests {
-    use super::{decode_tile, decode_tile_row, Ppu, PpuMode, DMG_SHADES};
+    use super::{
+        decode_tile, decode_tile_row, OamEntry, ObjectPalette, Ppu, PpuMode, DMG_SHADES,
+        SCREEN_WIDTH,
+    };
     use crate::{cpu::TCycles, interrupt::InterruptFlags};
 
     #[test]
@@ -481,6 +614,110 @@ mod tests {
             ppu.framebuffer()[0],
             DMG_SHADES[1],
             "SCX should shift the viewport to background pixel x=1"
+        );
+    }
+
+    #[test]
+    fn oam_entry_decodes_sprite_attributes() {
+        let sprite = OamEntry::from_oam(&[16, 8, 3, 0b1111_0000]);
+
+        assert_eq!(sprite.y, 16);
+        assert_eq!(sprite.x, 8);
+        assert_eq!(sprite.tile_index, 3);
+        assert!(sprite.bg_priority);
+        assert!(sprite.y_flip);
+        assert!(sprite.x_flip);
+        assert_eq!(sprite.palette, ObjectPalette::Obp1);
+    }
+
+    #[test]
+    fn basic_8x8_sprite_renders_nonzero_pixels_over_background() {
+        let mut ppu = Ppu::new();
+        ppu.write_register(0xFF40, 0x93);
+        ppu.write_register(0xFF48, 0b1110_0100);
+        ppu.write_vram(0x0020, 0b1000_0000);
+        ppu.write_vram(0x0021, 0);
+        ppu.write_oam(0, 16);
+        ppu.write_oam(1, 8);
+        ppu.write_oam(2, 2);
+
+        ppu.render_background();
+
+        assert_eq!(
+            ppu.framebuffer()[0],
+            DMG_SHADES[1],
+            "sprite at hardware x=8 y=16 should draw at screen origin"
+        );
+        assert_eq!(
+            ppu.framebuffer()[1],
+            DMG_SHADES[0],
+            "sprite color index 0 should remain transparent"
+        );
+    }
+
+    #[test]
+    fn sprite_flips_and_obp1_palette_are_applied() {
+        let mut ppu = Ppu::new();
+        ppu.write_register(0xFF40, 0x93);
+        ppu.write_register(0xFF49, 0b0001_1011);
+        ppu.write_vram(0x001E, 0b0000_0001);
+        ppu.write_vram(0x001F, 0);
+        ppu.write_oam(0, 16);
+        ppu.write_oam(1, 8);
+        ppu.write_oam(2, 1);
+        ppu.write_oam(3, 0b0111_0000);
+
+        ppu.render_background();
+
+        assert_eq!(
+            ppu.framebuffer()[0],
+            DMG_SHADES[2],
+            "x/y flipped sprite should use OBP1 for the visible pixel"
+        );
+    }
+
+    #[test]
+    fn sprite_priority_hides_sprite_behind_nonzero_background() {
+        let mut ppu = Ppu::new();
+        ppu.write_register(0xFF40, 0x93);
+        ppu.write_register(0xFF47, 0b1110_0100);
+        ppu.write_register(0xFF48, 0b0001_1011);
+        ppu.write_vram(0x0000, 0b1000_0000);
+        ppu.write_vram(0x0001, 0);
+        ppu.write_vram(0x1800, 0);
+        ppu.write_vram(0x0020, 0b1000_0000);
+        ppu.write_vram(0x0021, 0);
+        ppu.write_oam(0, 16);
+        ppu.write_oam(1, 8);
+        ppu.write_oam(2, 2);
+        ppu.write_oam(3, 0x80);
+
+        ppu.render_background();
+
+        assert_eq!(
+            ppu.framebuffer()[0],
+            DMG_SHADES[1],
+            "priority sprite should stay behind nonzero background pixels"
+        );
+    }
+
+    #[test]
+    fn sprite_8x16_mode_uses_second_tile_for_lower_half() {
+        let mut ppu = Ppu::new();
+        ppu.write_register(0xFF40, 0x97);
+        ppu.write_register(0xFF48, 0b1110_0100);
+        ppu.write_vram(0x0030, 0b1000_0000);
+        ppu.write_vram(0x0031, 0);
+        ppu.write_oam(0, 16);
+        ppu.write_oam(1, 8);
+        ppu.write_oam(2, 2);
+
+        ppu.render_background();
+
+        assert_eq!(
+            ppu.framebuffer()[8 * SCREEN_WIDTH],
+            DMG_SHADES[1],
+            "8x16 sprites should draw the lower half from the next tile"
         );
     }
 

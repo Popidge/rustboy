@@ -33,8 +33,10 @@ const VRAM_START: u16 = 0x8000;
 const VRAM_END: u16 = 0x9FFF;
 const OAM_START: u16 = 0xFE00;
 const OAM_END: u16 = 0xFE9F;
+const OAM_SIZE: u16 = 0x00A0;
 const UNUSABLE_OAM_START: u16 = 0xFEA0;
 const UNUSABLE_OAM_END: u16 = 0xFEFF;
+const DMA_ADDR: u16 = 0xFF46;
 const PPU_REGISTER_START: u16 = 0xFF40;
 const PPU_REGISTER_END: u16 = 0xFF4B;
 
@@ -105,6 +107,7 @@ impl Bus {
             SERIAL_START..=SERIAL_END => self.serial.write(address, value),
             TIMER_START..=TIMER_END => self.timer.write(address, value),
             INTERRUPT_FLAGS_ADDR => self.interrupt_flags.write_if(value),
+            DMA_ADDR => self.run_oam_dma(value),
             PPU_REGISTER_START..=PPU_REGISTER_END => self.ppu.write_register(address, value),
             HRAM_START..=HRAM_END => self.hram[hram_index(address)] = value,
             INTERRUPT_ENABLE_ADDR => self.interrupt_enable.set_raw(value),
@@ -192,6 +195,15 @@ impl Bus {
     #[must_use]
     pub fn pending_interrupt(&self) -> Option<Interrupt> {
         InterruptFlags::first_pending(self.interrupt_enable, self.interrupt_flags)
+    }
+
+    fn run_oam_dma(&mut self, value: u8) {
+        let source_start = u16::from(value) << 8;
+
+        for offset in 0..OAM_SIZE {
+            let byte = self.read8(source_start.wrapping_add(offset));
+            self.ppu.write_oam(offset, byte);
+        }
     }
 }
 

@@ -1,5 +1,41 @@
 # Milestones
 
+## 0026: Add DMA and sprite rendering
+
+Date: 2026-06-10
+
+Status: Complete
+
+### Goal
+
+Implement roadmap Stage 19 by adding OAM DMA, sprite attribute parsing, and basic DMG sprite rendering.
+
+### Changes
+
+- Routed `FF46` DMA writes through `Bus` and copied 160 bytes from `N << 8` into OAM.
+- Added `OamEntry` parsing for sprite coordinates, tile index, priority, flips, and object palette selection.
+- Rendered 8x8 and 8x16 sprites over the background with transparent colour 0.
+- Applied X/Y flip, OBP0/OBP1 palette selection, OAM order, and basic background priority behaviour.
+
+### Tests
+
+- `cargo fmt`
+- `cargo test -p gb-core sprite`
+- `cargo test -p gb-core dma`
+- `cargo test`
+- `cargo clippy --all-targets --all-features`
+- Added a bus DMA test and PPU unit tests for sprite parsing, basic rendering, flips/palettes, priority, and 8x16 mode.
+
+### Decisions
+
+- Kept DMA as an immediate bus copy for this milestone rather than modelling CPU stall timing.
+- Kept sprite rendering inside PPU scanline rendering and reused existing DMG shade palette mapping.
+- Added no dependencies.
+
+### Notes
+
+- Detailed sprite timing and per-scanline sprite limits remain future accuracy work.
+
 ## 0025: Add joypad input
 
 Date: 2026-06-10

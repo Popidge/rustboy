@@ -11,7 +11,7 @@ pub mod timer;
 
 use bus::Bus;
 use cartridge::{Cartridge, CartridgeError, SaveRamError};
-use cpu::{Cpu, CpuError, TCycles};
+use cpu::{Cpu, CpuError, CpuRegisters, TCycles};
 use joypad::Button;
 use ppu::FRAMEBUFFER_PIXELS;
 
@@ -72,6 +72,21 @@ impl GameBoy {
     #[must_use]
     pub fn framebuffer(&self) -> &[u32; FRAMEBUFFER_PIXELS] {
         self.bus.framebuffer()
+    }
+
+    /// Returns a read-only snapshot of the CPU registers for debugging UIs.
+    #[must_use]
+    pub fn registers(&self) -> &CpuRegisters {
+        self.cpu.registers()
+    }
+
+    /// Reads a byte through the bus for debugging UIs.
+    ///
+    /// This is intentionally a read-only inspection helper. CPU execution still
+    /// owns all normal memory access.
+    #[must_use]
+    pub fn debug_read8(&self, address: u16) -> u8 {
+        self.bus.read8(address)
     }
 
     /// Returns collected serial debug output without draining it.

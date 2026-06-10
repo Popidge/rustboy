@@ -1,5 +1,124 @@
 # Milestones
 
+## 0033: Improve manual harness ROM navigation
+
+Date: 2026-06-10
+
+Status: Complete
+
+### Goal
+
+Make the desktop harness easier to use with large external test ROM suites.
+
+### Changes
+
+- Increased the harness window to `1280x800`.
+- Replaced the flat ROM list with a collapsible file tree showing folder ROM counts.
+- Added left/right folder collapse and expand behaviour; enter toggles folders or runs ROMs.
+- Fixed the ROM list/instructions overlap by constraining the tree list height.
+- Added full-width lower panels for selected ROM and running ROM details.
+- Kept the right status panel focused on live runtime state, serial output, errors, and golden preview.
+
+### Tests
+
+- `cargo fmt`
+- `cargo test`
+- `cargo clippy --all-targets --all-features`
+- Added a desktop unit test for hiding children under collapsed tree entries.
+
+### Decisions
+
+- Kept the harness as dependency-light custom pixel UI instead of adding an immediate-mode GUI dependency.
+- Stored the ROM browser as flattened tree entries with depth and expanded state for simple keyboard navigation.
+- Added no dependencies.
+
+### Notes
+
+- The tree initially shows top-level folders collapsed; use right arrow or enter to open folders.
+
+## 0032: Add manual GUI ROM testing harness
+
+Date: 2026-06-10
+
+Status: Complete
+
+### Goal
+
+Add an early developer GUI harness that can launch from the desktop executable,
+pick local test ROMs, run them visually, and show useful comparison/debug info.
+
+### Changes
+
+- Added no-argument / `--harness` desktop mode that recursively lists `.gb` and `.gbc` files under `test-roms/`.
+- Added keyboard selection and run controls: up/down, page up/down, home/end, enter, space pause, and `R` reset.
+- Composed a harness window with ROM list, live scaled Game Boy framebuffer, CPU/PPU/interrupt/serial diagnostics, errors, and golden PNG preview when a matching image exists beside the ROM.
+- Added read-only `GameBoy` debug accessors for CPU registers and bus byte inspection.
+- Preserved direct ROM launch and existing headless serial/Mooneye/frame-dump tooling.
+
+### Tests
+
+- `cargo fmt`
+- `cargo test`
+- `cargo clippy --all-targets --all-features`
+- Added desktop unit tests for `--harness` option parsing, ROM extension filtering, and debug path truncation.
+
+### Decisions
+
+- Kept the harness in `gb-desktop`; `gb-core` only exposes read-only debug inspection.
+- Added `font8x8` to `gb-desktop` for simple pixel text rendering.
+- Added `image` with PNG support to `gb-desktop` to load local golden screenshots.
+- Kept the first harness keyboard-driven and dependency-light instead of introducing a full immediate-mode GUI stack.
+
+### Notes
+
+- Golden matching currently looks for PNGs in the ROM's directory whose stem starts with the ROM stem, preferring DMG-labelled images.
+- This is intentionally early dev tooling: it is useful for manual inspection, not yet an automated visual assertion runner.
+
+## 0031: Add headless compatibility gauntlet tooling
+
+Date: 2026-06-10
+
+Status: Complete
+
+### Goal
+
+Add token-efficient ROM test output for serial, Mooneye, and visual-only PPU
+tests, then use it to run the next expected-pass compatibility gauntlet.
+
+### Changes
+
+- Added `--frames N --dump-frame hash|blocks:N|pixels|all` to print stable framebuffer hashes, block digests, and full greppable pixel maps.
+- Added `--mooneye-steps N` to detect Mooneye's `0xED` exit opcode and report the Fibonacci pass/fail register signature.
+- Mirrored unavailable cartridge ROM bank bits against the loaded ROM bank count so small MBC1 ROMs behave correctly.
+- Added STAT coincidence/mode interrupt signalling, DMG window Y trigger state, internal window line counting, 10-sprite line selection, and DMG sprite priority sorting.
+
+### Tests
+
+- `cargo fmt`
+- `cargo test -p gb-desktop`
+- `cargo test -p gb-core mbc1_small_roms_mirror_unavailable_upper_bank_bits`
+- `cargo test -p gb-core ppu::tests`
+- `cargo run --release -p gb-desktop --quiet -- test-roms\blargg\cpu_instrs\cpu_instrs.gb --serial-steps 120000000`
+- Blargg `cpu_instrs/individual/*.gb` all printed `Passed`.
+- `cargo run --release -p gb-desktop --quiet -- test-roms\blargg\instr_timing\instr_timing.gb --serial-steps 120000000`
+- Mooneye `acceptance/bits/reg_f.gb`, `acceptance/bits/mem_oam.gb`, and `emulator-only/mbc1_rom_4banks.gb` all printed `Mooneye: Passed`.
+- Visual frame hashes at frame 60: `dmg-acid2` `b14891ff582424f6`, `firstwhite` `10f86562dc4dc24d`, `tellinglys` `1129354be22bf77e`, `window_y_trigger` `617480c61a3f32a6`, `window_y_trigger_wx_offscreen` `4ded2a7ac6a6a68d`, `strikethrough` `d1cbcf3f725fda4e`.
+- `dmg-acid2` and both Turtle window tests were rendered to temporary PNGs under `target/` and visually matched their bundled expected images.
+- `cargo run --release -p gb-desktop --quiet -- test-roms\blargg\mem_timing-2\mem_timing.gb --serial-steps 500000000` produced no serial result, so it remains an unresolved diagnostic candidate.
+- `cargo run --release -p gb-desktop --quiet -- test-roms\blargg\mem_timing\mem_timing.gb --serial-steps 500000000` printed `Failed 3 tests`; this is deferred memory timing accuracy work, not part of the current expected-pass lane.
+
+### Decisions
+
+- Kept visual dump tooling in `gb-desktop`; `gb-core` still exposes only emulator state.
+- Used an internal dependency-free FNV-1a framebuffer hash rather than adding a hashing crate.
+- Treated `strikethrough` as diagnostic because it targets unusual OAM DMA behaviour beyond the current immediate-copy DMA model.
+- Added no dependencies.
+
+### Notes
+
+- The visual text dump is now suitable for agent-readable golden output.
+- Future work can promote frame hashes or pixel maps into automated optional ROM tests once expected outputs are checked in or generated locally.
+
 ## 0030: Add MBC2, MBC3, MBC5, and RTC cartridge support
 
 Date: 2026-06-10

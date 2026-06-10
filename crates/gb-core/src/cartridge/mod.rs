@@ -177,20 +177,24 @@ impl Cartridge {
         let cartridge_type = self.header.cartridge_type();
         let index = match (cartridge_type, address) {
             (cartridge_type, 0x0000..=0x3FFF) if cartridge_type.is_mbc1() => {
-                self.mbc1_fixed_bank() * ROM_BANK_SIZE + usize::from(address)
+                self.effective_rom_bank(self.mbc1_fixed_bank()) * ROM_BANK_SIZE
+                    + usize::from(address)
             }
             (cartridge_type, 0x4000..=0x7FFF) if cartridge_type.is_mbc1() => {
-                self.mbc1_switchable_bank() * ROM_BANK_SIZE + usize::from(address - 0x4000)
+                self.effective_rom_bank(self.mbc1_switchable_bank()) * ROM_BANK_SIZE
+                    + usize::from(address - 0x4000)
             }
             (cartridge_type, 0x4000..=0x7FFF) if cartridge_type.is_mbc2() => {
-                usize::from(self.lower_rom_bank_bits) * ROM_BANK_SIZE
+                self.effective_rom_bank(usize::from(self.lower_rom_bank_bits)) * ROM_BANK_SIZE
                     + usize::from(address - 0x4000)
             }
             (cartridge_type, 0x4000..=0x7FFF) if cartridge_type.is_mbc3() => {
-                usize::from(self.mbc3_rom_bank) * ROM_BANK_SIZE + usize::from(address - 0x4000)
+                self.effective_rom_bank(usize::from(self.mbc3_rom_bank)) * ROM_BANK_SIZE
+                    + usize::from(address - 0x4000)
             }
             (cartridge_type, 0x4000..=0x7FFF) if cartridge_type.is_mbc5() => {
-                self.mbc5_effective_rom_bank() * ROM_BANK_SIZE + usize::from(address - 0x4000)
+                self.effective_rom_bank(self.mbc5_selected_rom_bank()) * ROM_BANK_SIZE
+                    + usize::from(address - 0x4000)
             }
             _ => usize::from(address),
         };
@@ -386,7 +390,13 @@ impl Cartridge {
         }
     }
 
-    fn mbc5_effective_rom_bank(&self) -> usize {
+    fn effective_rom_bank(&self, bank: usize) -> usize {
+        let bank_count = (self.rom.len() / ROM_BANK_SIZE).max(1);
+
+        bank % bank_count
+    }
+
+    fn mbc5_selected_rom_bank(&self) -> usize {
         let bank = usize::from(self.mbc5_rom_bank);
         if self.header.cartridge_type() == CartridgeType::Mbc30 {
             bank & 0x1F
@@ -885,6 +895,21 @@ mod tests {
             cartridge.read_rom(0x4000),
             Ok(0x22),
             "switchable region should combine upper bits with lower ROM bank bits"
+        );
+    }
+
+    #[test]
+    fn mbc1_small_roms_mirror_unavailable_upper_bank_bits() {
+        let rom = fake_banked_rom(b"MBC1SMALL", 0x01, 0x01, 0x00, 4);
+        let mut cartridge = Cartridge::from_bytes(rom).expect("MBC1 header should parse");
+
+        cartridge.write_rom(0x2000, 0x02);
+        cartridge.write_rom(0x4000, 0x01);
+
+        assert_eq!(
+            cartridge.read_rom(0x4000),
+            Ok(0x02),
+            "4-bank MBC1 ROMs should ignore unavailable upper bank select bits"
         );
     }
 

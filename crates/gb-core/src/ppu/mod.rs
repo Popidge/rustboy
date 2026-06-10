@@ -53,6 +53,9 @@ pub struct Ppu {
     wx: u8,
     mode: PpuMode,
     line_dots: u32,
+    stat_interrupt_active: bool,
+    window_y_triggered: bool,
+    window_line: u8,
     framebuffer: [u32; FRAMEBUFFER_PIXELS],
     frame_ready: bool,
 }
@@ -80,6 +83,9 @@ impl Ppu {
             wx: 0,
             mode: PpuMode::OamSearch,
             line_dots: 0,
+            stat_interrupt_active: false,
+            window_y_triggered: false,
+            window_line: 0,
             framebuffer: [DMG_SHADES[0]; FRAMEBUFFER_PIXELS],
             frame_ready: false,
         }
@@ -111,7 +117,9 @@ impl Ppu {
     pub fn read_register(&self, address: u16) -> u8 {
         match address {
             LCDC_ADDR => self.lcdc.raw(),
-            STAT_ADDR => (self.stat & 0xF8) | self.mode.stat_bits(),
+            STAT_ADDR => {
+                (self.stat & 0xF8) | (u8::from(self.ly == self.lyc) << 2) | self.mode.stat_bits()
+            }
             SCY_ADDR => self.scy,
             SCX_ADDR => self.scx,
             LY_ADDR => self.ly,
@@ -148,7 +156,7 @@ impl Ppu {
     pub fn tick(&mut self, cycles: TCycles, interrupts: &mut InterruptFlags) {
         for _ in 0..cycles.0 {
             self.line_dots += 1;
-            self.update_mode();
+            self.update_mode(interrupts);
 
             if self.line_dots >= DOTS_PER_LINE {
                 self.finish_scanline(interrupts);
@@ -190,17 +198,21 @@ impl Ppu {
             self.mode = PpuMode::VBlank;
             self.frame_ready = true;
             interrupts.request(Interrupt::VBlank);
+            self.update_stat_interrupt(interrupts);
         } else if self.ly >= LINES_PER_FRAME {
             self.ly = 0;
             self.mode = PpuMode::OamSearch;
+            self.window_y_triggered = false;
+            self.window_line = 0;
             self.frame_ready = false;
+            self.update_stat_interrupt(interrupts);
         } else {
-            self.update_mode();
+            self.update_mode(interrupts);
         }
     }
 
-    fn update_mode(&mut self) {
-        self.mode = if self.ly >= VISIBLE_LINES {
+    fn update_mode(&mut self, interrupts: &mut InterruptFlags) {
+        let mode = if self.ly >= VISIBLE_LINES {
             PpuMode::VBlank
         } else if self.line_dots < OAM_DOTS {
             PpuMode::OamSearch
@@ -209,30 +221,71 @@ impl Ppu {
         } else {
             PpuMode::HBlank
         };
+
+        if self.mode == mode {
+            self.update_stat_interrupt(interrupts);
+        } else {
+            self.mode = mode;
+            self.update_stat_interrupt(interrupts);
+        }
+    }
+
+    fn update_stat_interrupt(&mut self, interrupts: &mut InterruptFlags) {
+        let signal = self.stat_interrupt_signal();
+
+        if signal && !self.stat_interrupt_active {
+            interrupts.request(Interrupt::LcdStat);
+        }
+
+        self.stat_interrupt_active = signal;
+    }
+
+    fn stat_interrupt_signal(&self) -> bool {
+        let lyc_signal = self.ly == self.lyc && self.stat & 0x40 != 0;
+        let mode_signal = match self.mode {
+            PpuMode::HBlank => self.stat & 0x08 != 0,
+            PpuMode::VBlank => self.stat & 0x10 != 0,
+            PpuMode::OamSearch => self.stat & 0x20 != 0,
+            PpuMode::PixelTransfer => false,
+        };
+
+        lyc_signal || mode_signal
     }
 
     fn render_scanline(&mut self, line: u8) {
         let screen_y = usize::from(line);
+        let mut window_used = false;
+
+        if self.lcdc.window_enabled() && line == self.wy {
+            self.window_y_triggered = true;
+        }
+
         for screen_x in 0..SCREEN_WIDTH {
             let screen_x_u8 = u8::try_from(screen_x).expect("screen width is smaller than u8::MAX");
-            let color_index = self.background_or_window_color_index(screen_x_u8, line);
+            let (color_index, used_window) =
+                self.background_or_window_color_index(screen_x_u8, line);
+            window_used |= used_window;
             let color = self.map_background_color(color_index);
             self.framebuffer[screen_y * SCREEN_WIDTH + screen_x] = color;
         }
 
         self.render_sprites_on_scanline(line);
+
+        if window_used {
+            self.window_line = self.window_line.wrapping_add(1);
+        }
     }
 
-    fn background_or_window_color_index(&self, screen_x: u8, screen_y: u8) -> u8 {
+    fn background_or_window_color_index(&self, screen_x: u8, screen_y: u8) -> (u8, bool) {
         if !self.lcdc.background_enabled() {
-            return 0;
+            return (0, false);
         }
 
-        if let Some(color_index) = self.window_color_index(screen_x, screen_y) {
-            return color_index;
+        if let Some(color_index) = self.window_color_index(screen_x) {
+            return (color_index, true);
         }
 
-        self.background_color_index(screen_x, screen_y)
+        (self.background_color_index(screen_x, screen_y), false)
     }
 
     fn background_color_index(&self, screen_x: u8, screen_y: u8) -> u8 {
@@ -250,8 +303,8 @@ impl Ppu {
         decode_tile_row(low, high)[usize::from(bg_x % 8)]
     }
 
-    fn window_color_index(&self, screen_x: u8, screen_y: u8) -> Option<u8> {
-        if !self.lcdc.window_enabled() || screen_y < self.wy {
+    fn window_color_index(&self, screen_x: u8) -> Option<u8> {
+        if !self.lcdc.window_enabled() || !self.window_y_triggered {
             return None;
         }
 
@@ -264,7 +317,7 @@ impl Ppu {
 
         let window_x = usize::try_from(screen_x - window_left)
             .expect("window x should be non-negative after bounds check");
-        let window_y = usize::from(screen_y - self.wy);
+        let window_y = usize::from(self.window_line);
         let tile_col = (window_x / 8) & 31;
         let tile_row = (window_y / 8) & 31;
         let tile_map_index = tile_row * 32 + tile_col;
@@ -290,13 +343,31 @@ impl Ppu {
         let sprite_height = self.lcdc.sprite_height();
         let line_i16 = i16::from(line);
 
-        for sprite_index in (0..40).rev() {
+        let mut visible_sprites = Vec::with_capacity(10);
+
+        for sprite_index in 0..40 {
             let sprite = OamEntry::from_oam(&self.oam[sprite_index * 4..sprite_index * 4 + 4]);
             let sprite_y = i16::from(sprite.y) - 16;
 
             if line_i16 < sprite_y || line_i16 >= sprite_y + i16::from(sprite_height) {
                 continue;
             }
+
+            visible_sprites.push((sprite_index, sprite));
+            if visible_sprites.len() == 10 {
+                break;
+            }
+        }
+
+        visible_sprites.sort_by(|(left_index, left), (right_index, right)| {
+            right
+                .x
+                .cmp(&left.x)
+                .then_with(|| right_index.cmp(left_index))
+        });
+
+        for (_, sprite) in visible_sprites {
+            let sprite_y = i16::from(sprite.y) - 16;
 
             let row_in_sprite = usize::try_from(line_i16 - sprite_y)
                 .expect("visible sprite row should be non-negative");
@@ -337,7 +408,8 @@ impl Ppu {
 
                 let screen_x_u8 =
                     u8::try_from(screen_x).expect("screen width is smaller than u8::MAX");
-                let background_index = self.background_or_window_color_index(screen_x_u8, line);
+                let (background_index, _) =
+                    self.background_or_window_color_index(screen_x_u8, line);
 
                 if sprite.bg_priority && background_index != 0 {
                     continue;
@@ -818,6 +890,87 @@ mod tests {
     }
 
     #[test]
+    fn window_uses_internal_line_counter_only_on_visible_window_lines() {
+        let mut ppu = Ppu::new();
+        ppu.write_register(0xFF40, 0xB1);
+        ppu.write_register(0xFF47, 0b1110_0100);
+        ppu.write_register(0xFF4A, 0);
+        ppu.write_register(0xFF4B, 7);
+        ppu.write_vram(0x0000, 0b1000_0000);
+        ppu.write_vram(0x0001, 0);
+        ppu.write_vram(0x0002, 0b0100_0000);
+        ppu.write_vram(0x0003, 0);
+        ppu.write_vram(0x0004, 0);
+        ppu.write_vram(0x0005, 0b1000_0000);
+        ppu.write_vram(0x1800, 0);
+
+        ppu.render_scanline(0);
+        ppu.write_register(0xFF4B, 200);
+        ppu.render_scanline(1);
+        ppu.write_register(0xFF4B, 7);
+        ppu.render_scanline(2);
+
+        assert_eq!(
+            ppu.framebuffer()[2 * SCREEN_WIDTH + 1],
+            DMG_SHADES[1],
+            "hidden window lines should not advance the internal window line counter"
+        );
+    }
+
+    #[test]
+    fn window_does_not_appear_when_wy_is_changed_after_trigger_line() {
+        let mut ppu = Ppu::new();
+        ppu.write_register(0xFF40, 0xB1);
+        ppu.write_register(0xFF47, 0b1110_0100);
+        ppu.write_register(0xFF4A, 10);
+        ppu.write_register(0xFF4B, 7);
+        ppu.write_vram(0x0000, 0);
+        ppu.write_vram(0x0001, 0);
+        ppu.write_vram(0x0010, 0b1000_0000);
+        ppu.write_vram(0x0011, 0);
+        ppu.write_vram(0x1800, 1);
+
+        ppu.render_scanline(8);
+        ppu.write_register(0xFF4A, 0);
+        ppu.render_scanline(9);
+
+        assert_eq!(
+            ppu.framebuffer()[9 * SCREEN_WIDTH],
+            DMG_SHADES[0],
+            "changing WY after its line has already passed should not trigger the window"
+        );
+    }
+
+    #[test]
+    fn sprites_are_limited_to_first_ten_visible_oam_entries_per_line() {
+        let mut ppu = Ppu::new();
+        ppu.write_register(0xFF40, 0x93);
+        ppu.write_register(0xFF48, 0b1110_0100);
+        ppu.write_vram(0x0010, 0b1000_0000);
+        ppu.write_vram(0x0011, 0);
+
+        for sprite in 0..10 {
+            let offset = sprite * 4;
+            let offset = u16::try_from(offset).expect("test OAM offset fits in u16");
+            ppu.write_oam(offset, 16);
+            ppu.write_oam(offset + 1, 168);
+            ppu.write_oam(offset + 2, 1);
+        }
+
+        ppu.write_oam(40, 16);
+        ppu.write_oam(41, 8);
+        ppu.write_oam(42, 1);
+
+        ppu.render_background();
+
+        assert_eq!(
+            ppu.framebuffer()[0],
+            DMG_SHADES[0],
+            "the eleventh visible sprite on a line should not be drawn"
+        );
+    }
+
+    #[test]
     fn tick_increments_ly_every_scanline_and_wraps_after_vblank() {
         let mut ppu = Ppu::new();
         let mut interrupts = InterruptFlags::default();
@@ -861,6 +1014,27 @@ mod tests {
             ppu.read_register(0xFF41) & 0x03,
             0,
             "after transfer comes HBlank"
+        );
+    }
+
+    #[test]
+    fn lyc_stat_interrupt_is_requested_when_coincidence_source_rises() {
+        let mut ppu = Ppu::new();
+        let mut interrupts = InterruptFlags::default();
+        ppu.write_register(0xFF41, 0x40);
+        ppu.write_register(0xFF45, 1);
+
+        ppu.tick(TCycles(456), &mut interrupts);
+
+        assert_eq!(
+            interrupts.raw() & 0x02,
+            0x02,
+            "LYC coincidence with STAT bit 6 enabled should request LCD STAT interrupt"
+        );
+        assert_eq!(
+            ppu.read_register(0xFF41) & 0x04,
+            0x04,
+            "STAT coincidence bit should reflect LY == LYC"
         );
     }
 }

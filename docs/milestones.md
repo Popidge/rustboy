@@ -1,5 +1,42 @@
 # Milestones
 
+## 0030: Add MBC2, MBC3, MBC5, and RTC cartridge support
+
+Date: 2026-06-10
+
+Status: Complete
+
+### Goal
+
+Complete roadmap Stage 22 and the cartridge stretch goals by adding broader MBC cartridge support, MBC3 RTC behaviour, and the MBC30 accessible-RAM quirk.
+
+### Changes
+
+- Decoded MBC2, MBC3, MBC5, MBC6, MBC7, MMM01, and MBC30 cartridge type names.
+- Implemented MBC2 ROM banking and 512 x 4-bit internal RAM behaviour.
+- Implemented MBC3 ROM/RAM banking and RTC register selection.
+- Implemented MBC5 nine-bit ROM banking and RAM banking, including MBC5 rumble cartridge type families.
+- Added MBC3 RTC registers backed by host time plus a cartridge-local offset so games can set RTC time through register writes.
+- Modelled MBC30 as MBC5-like with only 64 KiB of accessible RAM, ignoring the high RAM bank select bit.
+
+### Tests
+
+- `cargo fmt`
+- `cargo test`
+- `cargo clippy --all-targets --all-features`
+- Added cartridge tests for Stage 22 mapper decoding, MBC2 address-bit behaviour, MBC3 ROM/RAM/RTC registers, MBC5 nine-bit ROM banking, and MBC30 RAM mirroring.
+
+### Decisions
+
+- Used a host-time RTC offset rather than storing absolute host timestamps in `gb-core`.
+- Kept RTC persistence metadata out of the save format for now; save RAM byte persistence remains the only desktop sidecar data.
+- Treated MBC6, MBC7, and MMM01 as decoded cartridge identities but did not emulate their special hardware beyond clear type reporting.
+- Added no dependencies.
+
+### Notes
+
+- RTC halt, latch, and register writes are modelled, but future compatibility work may refine persistence and edge-case carry timing.
+
 ## 0029: Complete MBC1 cartridge support
 
 Date: 2026-06-10

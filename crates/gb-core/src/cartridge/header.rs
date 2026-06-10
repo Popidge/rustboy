@@ -112,6 +112,25 @@ pub enum CartridgeType {
     Mbc1,
     Mbc1Ram,
     Mbc1RamBattery,
+    Mbc2,
+    Mbc2Battery,
+    Mbc3TimerBattery,
+    Mbc3TimerRamBattery,
+    Mbc3,
+    Mbc3Ram,
+    Mbc3RamBattery,
+    Mbc5,
+    Mbc5Ram,
+    Mbc5RamBattery,
+    Mbc5Rumble,
+    Mbc5RumbleRam,
+    Mbc5RumbleRamBattery,
+    Mbc6,
+    Mbc7SensorRumbleRamBattery,
+    Mmm01,
+    Mmm01Ram,
+    Mmm01RamBattery,
+    Mbc30,
     Unsupported(u8),
 }
 
@@ -123,6 +142,25 @@ impl CartridgeType {
             0x01 => Self::Mbc1,
             0x02 => Self::Mbc1Ram,
             0x03 => Self::Mbc1RamBattery,
+            0x05 => Self::Mbc2,
+            0x06 => Self::Mbc2Battery,
+            0x0F => Self::Mbc3TimerBattery,
+            0x10 => Self::Mbc3TimerRamBattery,
+            0x11 => Self::Mbc3,
+            0x12 => Self::Mbc3Ram,
+            0x13 => Self::Mbc3RamBattery,
+            0x19 => Self::Mbc5,
+            0x1A => Self::Mbc5Ram,
+            0x1B => Self::Mbc5RamBattery,
+            0x1C => Self::Mbc5Rumble,
+            0x1D => Self::Mbc5RumbleRam,
+            0x1E => Self::Mbc5RumbleRamBattery,
+            0x20 => Self::Mbc6,
+            0x22 => Self::Mbc7SensorRumbleRamBattery,
+            0x0B => Self::Mmm01,
+            0x0C => Self::Mmm01Ram,
+            0x0D => Self::Mmm01RamBattery,
+            0xFC => Self::Mbc30,
             unsupported => Self::Unsupported(unsupported),
         }
     }
@@ -135,8 +173,56 @@ impl CartridgeType {
     }
 
     #[must_use]
+    pub fn is_mbc2(self) -> bool {
+        matches!(self, Self::Mbc2 | Self::Mbc2Battery)
+    }
+
+    #[must_use]
+    pub fn is_mbc3(self) -> bool {
+        matches!(
+            self,
+            Self::Mbc3
+                | Self::Mbc3Ram
+                | Self::Mbc3RamBattery
+                | Self::Mbc3TimerBattery
+                | Self::Mbc3TimerRamBattery
+        )
+    }
+
+    #[must_use]
+    pub fn is_mbc5(self) -> bool {
+        matches!(
+            self,
+            Self::Mbc5
+                | Self::Mbc5Ram
+                | Self::Mbc5RamBattery
+                | Self::Mbc5Rumble
+                | Self::Mbc5RumbleRam
+                | Self::Mbc5RumbleRamBattery
+                | Self::Mbc30
+        )
+    }
+
+    #[must_use]
+    pub fn has_rtc(self) -> bool {
+        matches!(self, Self::Mbc3TimerBattery | Self::Mbc3TimerRamBattery)
+    }
+
+    #[must_use]
     pub fn has_battery(self) -> bool {
-        matches!(self, Self::Mbc1RamBattery)
+        matches!(
+            self,
+            Self::Mbc1RamBattery
+                | Self::Mbc2Battery
+                | Self::Mbc3TimerBattery
+                | Self::Mbc3TimerRamBattery
+                | Self::Mbc3RamBattery
+                | Self::Mbc5RamBattery
+                | Self::Mbc5RumbleRamBattery
+                | Self::Mbc7SensorRumbleRamBattery
+                | Self::Mmm01RamBattery
+                | Self::Mbc30
+        )
     }
 }
 
@@ -147,6 +233,27 @@ impl fmt::Display for CartridgeType {
             Self::Mbc1 => formatter.write_str("MBC1"),
             Self::Mbc1Ram => formatter.write_str("MBC1+RAM"),
             Self::Mbc1RamBattery => formatter.write_str("MBC1+RAM+BATTERY"),
+            Self::Mbc2 => formatter.write_str("MBC2"),
+            Self::Mbc2Battery => formatter.write_str("MBC2+BATTERY"),
+            Self::Mbc3TimerBattery => formatter.write_str("MBC3+TIMER+BATTERY"),
+            Self::Mbc3TimerRamBattery => formatter.write_str("MBC3+TIMER+RAM+BATTERY"),
+            Self::Mbc3 => formatter.write_str("MBC3"),
+            Self::Mbc3Ram => formatter.write_str("MBC3+RAM"),
+            Self::Mbc3RamBattery => formatter.write_str("MBC3+RAM+BATTERY"),
+            Self::Mbc5 => formatter.write_str("MBC5"),
+            Self::Mbc5Ram => formatter.write_str("MBC5+RAM"),
+            Self::Mbc5RamBattery => formatter.write_str("MBC5+RAM+BATTERY"),
+            Self::Mbc5Rumble => formatter.write_str("MBC5+RUMBLE"),
+            Self::Mbc5RumbleRam => formatter.write_str("MBC5+RUMBLE+RAM"),
+            Self::Mbc5RumbleRamBattery => formatter.write_str("MBC5+RUMBLE+RAM+BATTERY"),
+            Self::Mbc6 => formatter.write_str("MBC6"),
+            Self::Mbc7SensorRumbleRamBattery => {
+                formatter.write_str("MBC7+SENSOR+RUMBLE+RAM+BATTERY")
+            }
+            Self::Mmm01 => formatter.write_str("MMM01"),
+            Self::Mmm01Ram => formatter.write_str("MMM01+RAM"),
+            Self::Mmm01RamBattery => formatter.write_str("MMM01+RAM+BATTERY"),
+            Self::Mbc30 => formatter.write_str("MBC30"),
             Self::Unsupported(code) => write!(formatter, "Unsupported (0x{code:02X})"),
         }
     }

@@ -6,11 +6,17 @@
 mod header;
 
 pub use header::{CartridgeHeader, CartridgeType, RamSize, RomSize};
-use std::{error::Error, fmt};
+use std::{
+    error::Error,
+    fmt,
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 const ROM_ADDRESS_END: u16 = 0x7FFF;
 const ROM_BANK_SIZE: usize = 0x4000;
 const RAM_BANK_SIZE: usize = 0x2000;
+const MBC2_RAM_SIZE: usize = 512;
+const MBC30_ACCESSIBLE_RAM_SIZE: usize = 64 * 1024;
 
 /// A loaded Game Boy cartridge ROM.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -20,6 +26,11 @@ pub struct Cartridge {
     header: CartridgeHeader,
     lower_rom_bank_bits: u8,
     upper_bank_bits: u8,
+    mbc3_rom_bank: u8,
+    mbc3_ram_or_rtc_select: u8,
+    mbc5_rom_bank: u16,
+    mbc5_ram_bank: u8,
+    rtc: Rtc,
     banking_mode: BankingMode,
     ram_enabled: bool,
 }
@@ -28,6 +39,24 @@ pub struct Cartridge {
 enum BankingMode {
     Rom,
     Ram,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Rtc {
+    offset_seconds: i64,
+    halted: bool,
+    day_carry: bool,
+    latched: Option<RtcRegisters>,
+    latch_previous: u8,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RtcRegisters {
+    seconds: u8,
+    minutes: u8,
+    hours: u8,
+    day_low: u8,
+    day_high: u8,
 }
 
 /// Errors that can occur while loading cartridge bytes.
@@ -79,13 +108,19 @@ impl Cartridge {
         }
 
         let header = CartridgeHeader::from_rom(&bytes)?;
+        let ram_size = cartridge_ram_size(header.cartridge_type(), header.ram_size());
 
         Ok(Self {
             rom: bytes,
-            ram: vec![0; header.ram_size().bytes()],
+            ram: vec![0; ram_size],
             header,
             lower_rom_bank_bits: 1,
             upper_bank_bits: 0,
+            mbc3_rom_bank: 1,
+            mbc3_ram_or_rtc_select: 0,
+            mbc5_rom_bank: 1,
+            mbc5_ram_bank: 0,
+            rtc: Rtc::new(),
             banking_mode: BankingMode::Rom,
             ram_enabled: false,
         })
@@ -139,12 +174,23 @@ impl Cartridge {
             return Err(CartridgeReadError::AddressOutOfRange { address });
         }
 
-        let index = match (self.header.cartridge_type(), address) {
+        let cartridge_type = self.header.cartridge_type();
+        let index = match (cartridge_type, address) {
             (cartridge_type, 0x0000..=0x3FFF) if cartridge_type.is_mbc1() => {
                 self.mbc1_fixed_bank() * ROM_BANK_SIZE + usize::from(address)
             }
             (cartridge_type, 0x4000..=0x7FFF) if cartridge_type.is_mbc1() => {
                 self.mbc1_switchable_bank() * ROM_BANK_SIZE + usize::from(address - 0x4000)
+            }
+            (cartridge_type, 0x4000..=0x7FFF) if cartridge_type.is_mbc2() => {
+                usize::from(self.lower_rom_bank_bits) * ROM_BANK_SIZE
+                    + usize::from(address - 0x4000)
+            }
+            (cartridge_type, 0x4000..=0x7FFF) if cartridge_type.is_mbc3() => {
+                usize::from(self.mbc3_rom_bank) * ROM_BANK_SIZE + usize::from(address - 0x4000)
+            }
+            (cartridge_type, 0x4000..=0x7FFF) if cartridge_type.is_mbc5() => {
+                self.mbc5_effective_rom_bank() * ROM_BANK_SIZE + usize::from(address - 0x4000)
             }
             _ => usize::from(address),
         };
@@ -159,32 +205,34 @@ impl Cartridge {
     ///
     /// ROM-only cartridges ignore these writes.
     pub fn write_rom(&mut self, address: u16, value: u8) {
-        if !self.header.cartridge_type().is_mbc1() {
-            return;
-        }
-
-        match address {
-            0x0000..=0x1FFF => self.ram_enabled = value & 0x0F == 0x0A,
-            0x2000..=0x3FFF => {
-                let bank = value & 0x1F;
-                self.lower_rom_bank_bits = if bank == 0 { 1 } else { bank };
-            }
-            0x4000..=0x5FFF => self.upper_bank_bits = value & 0x03,
-            0x6000..=0x7FFF => {
-                self.banking_mode = if value & 0x01 == 0 {
-                    BankingMode::Rom
-                } else {
-                    BankingMode::Ram
-                };
-            }
-            _ => {}
+        let cartridge_type = self.header.cartridge_type();
+        if cartridge_type.is_mbc1() {
+            self.write_mbc1_rom(address, value);
+        } else if cartridge_type.is_mbc2() {
+            self.write_mbc2_rom(address, value);
+        } else if cartridge_type.is_mbc3() {
+            self.write_mbc3_rom(address, value);
+        } else if cartridge_type.is_mbc5() {
+            self.write_mbc5_rom(address, value);
         }
     }
 
     #[must_use]
     pub fn read_ram(&self, address: u16) -> u8 {
-        if !(0xA000..=0xBFFF).contains(&address) || !self.ram_enabled || self.ram.is_empty() {
+        if !(0xA000..=0xBFFF).contains(&address) || !self.ram_enabled {
             return 0xFF;
+        }
+
+        let cartridge_type = self.header.cartridge_type();
+        if cartridge_type.is_mbc3() && (0x08..=0x0C).contains(&self.mbc3_ram_or_rtc_select) {
+            return self.rtc.read(self.mbc3_ram_or_rtc_select);
+        }
+        if self.ram.is_empty() {
+            return 0xFF;
+        }
+        if cartridge_type.is_mbc2() {
+            let index = usize::from(address - 0xA000) & 0x01FF;
+            return 0xF0 | (self.ram[index] & 0x0F);
         }
 
         let index = self.selected_ram_bank() * RAM_BANK_SIZE + usize::from(address - 0xA000);
@@ -192,7 +240,21 @@ impl Cartridge {
     }
 
     pub fn write_ram(&mut self, address: u16, value: u8) {
-        if !(0xA000..=0xBFFF).contains(&address) || !self.ram_enabled || self.ram.is_empty() {
+        if !(0xA000..=0xBFFF).contains(&address) || !self.ram_enabled {
+            return;
+        }
+
+        let cartridge_type = self.header.cartridge_type();
+        if cartridge_type.is_mbc3() && (0x08..=0x0C).contains(&self.mbc3_ram_or_rtc_select) {
+            self.rtc.write(self.mbc3_ram_or_rtc_select, value);
+            return;
+        }
+        if self.ram.is_empty() {
+            return;
+        }
+        if cartridge_type.is_mbc2() {
+            let index = usize::from(address - 0xA000) & 0x01FF;
+            self.ram[index] = value & 0x0F;
             return;
         }
 
@@ -246,11 +308,218 @@ impl Cartridge {
     }
 
     fn selected_ram_bank(&self) -> usize {
-        match self.banking_mode {
-            BankingMode::Rom => 0,
-            BankingMode::Ram => usize::from(self.upper_bank_bits),
+        let cartridge_type = self.header.cartridge_type();
+        if cartridge_type.is_mbc1() {
+            match self.banking_mode {
+                BankingMode::Rom => 0,
+                BankingMode::Ram => usize::from(self.upper_bank_bits),
+            }
+        } else if cartridge_type.is_mbc2() {
+            0
+        } else if cartridge_type.is_mbc3() {
+            usize::from(self.mbc3_ram_or_rtc_select.min(0x03))
+        } else if cartridge_type.is_mbc5() {
+            if cartridge_type == CartridgeType::Mbc30 {
+                usize::from(self.mbc5_ram_bank & 0x07)
+            } else {
+                usize::from(self.mbc5_ram_bank)
+            }
+        } else {
+            0
         }
     }
+
+    fn write_mbc1_rom(&mut self, address: u16, value: u8) {
+        match address {
+            0x0000..=0x1FFF => self.ram_enabled = value & 0x0F == 0x0A,
+            0x2000..=0x3FFF => {
+                let bank = value & 0x1F;
+                self.lower_rom_bank_bits = if bank == 0 { 1 } else { bank };
+            }
+            0x4000..=0x5FFF => self.upper_bank_bits = value & 0x03,
+            0x6000..=0x7FFF => {
+                self.banking_mode = if value & 0x01 == 0 {
+                    BankingMode::Rom
+                } else {
+                    BankingMode::Ram
+                };
+            }
+            _ => {}
+        }
+    }
+
+    fn write_mbc2_rom(&mut self, address: u16, value: u8) {
+        match address {
+            0x0000..=0x3FFF if address & 0x0100 == 0 => self.ram_enabled = value & 0x0F == 0x0A,
+            0x0000..=0x3FFF => {
+                let bank = value & 0x0F;
+                self.lower_rom_bank_bits = if bank == 0 { 1 } else { bank };
+            }
+            _ => {}
+        }
+    }
+
+    fn write_mbc3_rom(&mut self, address: u16, value: u8) {
+        match address {
+            0x0000..=0x1FFF => self.ram_enabled = value & 0x0F == 0x0A,
+            0x2000..=0x3FFF => {
+                let bank = value & 0x7F;
+                self.mbc3_rom_bank = if bank == 0 { 1 } else { bank };
+            }
+            0x4000..=0x5FFF => self.mbc3_ram_or_rtc_select = value,
+            0x6000..=0x7FFF => self.rtc.latch(value),
+            _ => {}
+        }
+    }
+
+    fn write_mbc5_rom(&mut self, address: u16, value: u8) {
+        match address {
+            0x0000..=0x1FFF => self.ram_enabled = value & 0x0F == 0x0A,
+            0x2000..=0x2FFF => {
+                self.mbc5_rom_bank = (self.mbc5_rom_bank & 0x0100) | u16::from(value);
+            }
+            0x3000..=0x3FFF => {
+                self.mbc5_rom_bank = (self.mbc5_rom_bank & 0x00FF) | (u16::from(value & 0x01) << 8);
+            }
+            0x4000..=0x5FFF => self.mbc5_ram_bank = value & 0x0F,
+            _ => {}
+        }
+    }
+
+    fn mbc5_effective_rom_bank(&self) -> usize {
+        let bank = usize::from(self.mbc5_rom_bank);
+        if self.header.cartridge_type() == CartridgeType::Mbc30 {
+            bank & 0x1F
+        } else {
+            bank
+        }
+    }
+}
+
+fn cartridge_ram_size(cartridge_type: CartridgeType, ram_size: RamSize) -> usize {
+    if cartridge_type.is_mbc2() {
+        MBC2_RAM_SIZE
+    } else if cartridge_type == CartridgeType::Mbc30 {
+        MBC30_ACCESSIBLE_RAM_SIZE
+    } else {
+        ram_size.bytes()
+    }
+}
+
+impl Rtc {
+    fn new() -> Self {
+        Self {
+            offset_seconds: 0,
+            halted: false,
+            day_carry: false,
+            latched: None,
+            latch_previous: 0,
+        }
+    }
+
+    fn read(&self, register: u8) -> u8 {
+        let registers = self.current_registers();
+        match register {
+            0x08 => registers.seconds,
+            0x09 => registers.minutes,
+            0x0A => registers.hours,
+            0x0B => registers.day_low,
+            0x0C => registers.day_high,
+            _ => 0xFF,
+        }
+    }
+
+    fn write(&mut self, register: u8, value: u8) {
+        let mut registers = self.current_registers();
+        match register {
+            0x08 => registers.seconds = value.min(59),
+            0x09 => registers.minutes = value.min(59),
+            0x0A => registers.hours = value.min(23),
+            0x0B => registers.day_low = value,
+            0x0C => {
+                registers.day_high = value & 0xC1;
+                self.day_carry = value & 0x80 != 0;
+                let was_halted = self.halted;
+                self.halted = value & 0x40 != 0;
+                if self.halted {
+                    self.latched = Some(registers);
+                    return;
+                }
+                if was_halted {
+                    self.set_time(registers);
+                    self.latched = None;
+                    return;
+                }
+            }
+            _ => return,
+        }
+
+        self.set_time(registers);
+        if self.halted {
+            self.latched = Some(registers);
+        }
+    }
+
+    fn latch(&mut self, value: u8) {
+        if self.latch_previous == 0 && value == 1 {
+            self.latched = Some(self.current_registers());
+        }
+        self.latch_previous = value;
+    }
+
+    fn current_registers(&self) -> RtcRegisters {
+        if self.halted {
+            return self.latched.unwrap_or_else(|| self.registers_from_total(0));
+        }
+
+        self.latched.unwrap_or_else(|| {
+            let total = host_seconds().saturating_add(self.offset_seconds);
+            self.registers_from_total(u64::try_from(total.max(0)).unwrap_or(0))
+        })
+    }
+
+    fn set_time(&mut self, registers: RtcRegisters) {
+        let target = i64::try_from(registers.total_seconds()).unwrap_or(i64::MAX);
+        self.offset_seconds = target.saturating_sub(host_seconds());
+    }
+
+    fn registers_from_total(&self, total_seconds: u64) -> RtcRegisters {
+        let seconds = (total_seconds % 60) as u8;
+        let minutes = ((total_seconds / 60) % 60) as u8;
+        let hours = ((total_seconds / 3600) % 24) as u8;
+        let days = total_seconds / 86_400;
+        let day_low = (days & 0xFF) as u8;
+        let day_bit = ((days >> 8) & 0x01) as u8;
+        let carry = self.day_carry || days > 511;
+        let day_high = day_bit | (u8::from(self.halted) << 6) | (u8::from(carry) << 7);
+
+        RtcRegisters {
+            seconds,
+            minutes,
+            hours,
+            day_low,
+            day_high,
+        }
+    }
+}
+
+impl RtcRegisters {
+    fn total_seconds(self) -> u64 {
+        let days = u64::from(self.day_low) | (u64::from(self.day_high & 0x01) << 8);
+
+        days * 86_400
+            + u64::from(self.hours.min(23)) * 3600
+            + u64::from(self.minutes.min(59)) * 60
+            + u64::from(self.seconds.min(59))
+    }
+}
+
+fn host_seconds() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |duration| {
+            i64::try_from(duration.as_secs()).unwrap_or(i64::MAX)
+        })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -358,6 +627,28 @@ mod tests {
             rom[bank * ROM_BANK_SIZE] = u8::try_from(bank).expect("test bank fits in u8");
         }
         rom[0x0150] = 0x11;
+        rom[HEADER_CHECKSUM_ADDR] =
+            calculate_header_checksum(&rom).expect("fake ROM should contain full header");
+        rom
+    }
+
+    fn fake_banked_rom(
+        title: &[u8],
+        cartridge_type_code: u8,
+        rom_capacity_code: u8,
+        external_ram_code: u8,
+        banks: usize,
+    ) -> Vec<u8> {
+        let mut rom = fake_rom(
+            title,
+            cartridge_type_code,
+            rom_capacity_code,
+            external_ram_code,
+        );
+        rom.resize(banks * ROM_BANK_SIZE, 0);
+        for bank in 0..banks {
+            rom[bank * ROM_BANK_SIZE] = u8::try_from(bank & 0xFF).expect("masked bank fits in u8");
+        }
         rom[HEADER_CHECKSUM_ADDR] =
             calculate_header_checksum(&rom).expect("fake ROM should contain full header");
         rom
@@ -473,15 +764,38 @@ mod tests {
 
     #[test]
     fn from_bytes_represents_unsupported_cartridge_type() {
-        let rom = fake_rom(b"ODDTYPE", 0xFC, 0x00, 0x00);
+        let rom = fake_rom(b"ODDTYPE", 0xFD, 0x00, 0x00);
 
         let cartridge = Cartridge::from_bytes(rom).expect("unsupported type should still parse");
 
         assert_eq!(
             cartridge.cartridge_type().to_string(),
-            "Unsupported (0xFC)",
+            "Unsupported (0xFD)",
             "unrecognized cartridge type codes should be represented clearly"
         );
+    }
+
+    #[test]
+    fn from_bytes_decodes_stage_22_cartridge_families() {
+        let cases = [
+            (0x06, "MBC2+BATTERY"),
+            (0x10, "MBC3+TIMER+RAM+BATTERY"),
+            (0x1E, "MBC5+RUMBLE+RAM+BATTERY"),
+            (0x20, "MBC6"),
+            (0x22, "MBC7+SENSOR+RUMBLE+RAM+BATTERY"),
+            (0xFC, "MBC30"),
+        ];
+
+        for (code, expected) in cases {
+            let rom = fake_rom(b"MAPPER", code, 0x00, 0x00);
+            let cartridge = Cartridge::from_bytes(rom).expect("mapper header should parse");
+
+            assert_eq!(
+                cartridge.cartridge_type().to_string(),
+                expected,
+                "cartridge type 0x{code:02X} should decode by name"
+            );
+        }
     }
 
     #[test]
@@ -671,6 +985,105 @@ mod tests {
                 expected: 4 * RAM_BANK_SIZE,
                 actual: 1
             }
+        );
+    }
+
+    #[test]
+    fn mbc2_uses_address_bit_for_ram_enable_and_bank_selects() {
+        let rom = fake_banked_rom(b"MBC2", 0x06, 0x02, 0x00, 16);
+        let mut cartridge = Cartridge::from_bytes(rom).expect("MBC2 header should parse");
+
+        cartridge.write_rom(0x2100, 0x03);
+        assert_eq!(
+            cartridge.read_rom(0x4000),
+            Ok(0x03),
+            "MBC2 writes with address bit 8 set should select ROM bank"
+        );
+
+        cartridge.write_ram(0xA000, 0x2A);
+        assert_eq!(
+            cartridge.read_ram(0xA000),
+            0xFF,
+            "MBC2 RAM should remain disabled until a low address-bit write enables it"
+        );
+
+        cartridge.write_rom(0x0000, 0x0A);
+        cartridge.write_ram(0xA000, 0x2A);
+        assert_eq!(
+            cartridge.read_ram(0xA000),
+            0xFA,
+            "MBC2 internal RAM stores only the lower nibble and reads high bits set"
+        );
+    }
+
+    #[test]
+    fn mbc3_banks_rom_ram_and_rtc_registers() {
+        let rom = fake_banked_rom(b"MBC3RTC", 0x10, 0x03, 0x03, 8);
+        let mut cartridge = Cartridge::from_bytes(rom).expect("MBC3 header should parse");
+
+        cartridge.write_rom(0x2000, 0x03);
+        assert_eq!(cartridge.read_rom(0x4000), Ok(0x03));
+
+        cartridge.write_rom(0x0000, 0x0A);
+        cartridge.write_rom(0x4000, 0x01);
+        cartridge.write_ram(0xA000, 0x77);
+        cartridge.write_rom(0x4000, 0x00);
+        assert_eq!(cartridge.read_ram(0xA000), 0x00);
+        cartridge.write_rom(0x4000, 0x01);
+        assert_eq!(cartridge.read_ram(0xA000), 0x77);
+
+        cartridge.write_rom(0x4000, 0x0C);
+        cartridge.write_ram(0xA000, 0x40);
+        cartridge.write_rom(0x4000, 0x08);
+        cartridge.write_ram(0xA000, 12);
+        cartridge.write_rom(0x4000, 0x09);
+        cartridge.write_ram(0xA000, 34);
+        cartridge.write_rom(0x4000, 0x0A);
+        cartridge.write_ram(0xA000, 5);
+        cartridge.write_rom(0x4000, 0x08);
+        assert_eq!(cartridge.read_ram(0xA000), 12);
+        cartridge.write_rom(0x4000, 0x09);
+        assert_eq!(cartridge.read_ram(0xA000), 34);
+        cartridge.write_rom(0x4000, 0x0A);
+        assert_eq!(cartridge.read_ram(0xA000), 5);
+    }
+
+    #[test]
+    fn mbc5_supports_nine_bit_rom_banks_and_ram_banks() {
+        let rom = fake_banked_rom(b"MBC5", 0x1B, 0x08, 0x03, 258);
+        let mut cartridge = Cartridge::from_bytes(rom).expect("MBC5 header should parse");
+
+        cartridge.write_rom(0x2000, 0x01);
+        cartridge.write_rom(0x3000, 0x01);
+        assert_eq!(
+            cartridge.read_rom(0x4000),
+            Ok(0x01),
+            "bank 0x101 should be selected even though the test marker wraps to one byte"
+        );
+
+        cartridge.write_rom(0x0000, 0x0A);
+        cartridge.write_rom(0x4000, 0x02);
+        cartridge.write_ram(0xA000, 0x55);
+        cartridge.write_rom(0x4000, 0x00);
+        assert_eq!(cartridge.read_ram(0xA000), 0x00);
+        cartridge.write_rom(0x4000, 0x02);
+        assert_eq!(cartridge.read_ram(0xA000), 0x55);
+    }
+
+    #[test]
+    fn mbc30_ram_bank_bit_three_is_ignored() {
+        let rom = fake_banked_rom(b"MBC30", 0xFC, 0x00, 0x05, 2);
+        let mut cartridge = Cartridge::from_bytes(rom).expect("MBC30 header should parse");
+
+        cartridge.write_rom(0x0000, 0x0A);
+        cartridge.write_rom(0x4000, 0x00);
+        cartridge.write_ram(0xA000, 0x31);
+        cartridge.write_rom(0x4000, 0x08);
+
+        assert_eq!(
+            cartridge.read_ram(0xA000),
+            0x31,
+            "MBC30 ignores the high RAM bank select bit, so bank 8 mirrors bank 0"
         );
     }
 

@@ -76,6 +76,7 @@ pub struct Cpu {
     registers: CpuRegisters,
     ime: bool,
     ime_enable_pending: bool,
+    halt_bug_pending: bool,
     run_state: CpuRunState,
 }
 
@@ -90,6 +91,7 @@ impl Cpu {
             registers: CpuRegisters::new_dmg_post_boot(),
             ime: false,
             ime_enable_pending: false,
+            halt_bug_pending: false,
             run_state: CpuRunState::Running,
         }
     }
@@ -151,7 +153,12 @@ impl Cpu {
         let enable_ime_after_step = self.ime_enable_pending;
         self.ime_enable_pending = false;
         let pc = self.registers.pc;
-        let opcode = self.fetch8(bus);
+        let opcode = if self.halt_bug_pending {
+            self.halt_bug_pending = false;
+            bus.read8(pc)
+        } else {
+            self.fetch8(bus)
+        };
 
         let result = match opcode {
             0x00 => Ok(TCycles(4)),
@@ -272,7 +279,7 @@ impl Cpu {
             0x73 => Ok(self.ld_addr_hl_r(Register8::E, bus)),
             0x74 => Ok(self.ld_addr_hl_r(Register8::H, bus)),
             0x75 => Ok(self.ld_addr_hl_r(Register8::L, bus)),
-            0x76 => Ok(self.halt()),
+            0x76 => Ok(self.halt(bus)),
             0x77 => Ok(self.ld_addr_hl_a(bus)),
             0x78 => Ok(self.ld_r_r(Register8::A, Register8::B)),
             0x79 => Ok(self.ld_r_r(Register8::A, Register8::C)),
@@ -498,8 +505,12 @@ impl Cpu {
         TCycles(4)
     }
 
-    fn halt(&mut self) -> TCycles {
-        self.run_state = CpuRunState::Halted;
+    fn halt(&mut self, bus: &Bus) -> TCycles {
+        if !self.ime && bus.pending_interrupt().is_some() {
+            self.halt_bug_pending = true;
+        } else {
+            self.run_state = CpuRunState::Halted;
+        }
 
         TCycles(4)
     }
@@ -3490,6 +3501,64 @@ mod tests {
             cpu.registers().pc,
             0x0102,
             "woken CPU should fetch normally"
+        );
+    }
+
+    #[test]
+    fn halt_bug_repeats_next_opcode_fetch_when_ime_is_clear_and_interrupt_pending() {
+        let mut bus = bus_with_bytes(&[(0x0100, 0x76), (0x0101, 0x3C)]);
+        let mut cpu = Cpu::new_dmg_post_boot();
+        cpu.registers.a = 0x10;
+        bus.write8(0xFFFF, Interrupt::Timer.mask());
+        bus.request_interrupt(Interrupt::Timer);
+
+        let halt_cycles = cpu.step(&mut bus);
+
+        assert_eq!(
+            halt_cycles,
+            Ok(TCycles(4)),
+            "HALT should still consume 4 T-cycles"
+        );
+        assert!(
+            !cpu.halted(),
+            "HALT bug should prevent entering the halted state"
+        );
+        assert_eq!(
+            cpu.registers().pc,
+            0x0101,
+            "HALT should consume its own opcode"
+        );
+
+        let first_inc_cycles = cpu.step(&mut bus);
+
+        assert_eq!(
+            first_inc_cycles,
+            Ok(TCycles(4)),
+            "first repeated INC A should execute normally"
+        );
+        assert_eq!(cpu.registers().a, 0x11, "first repeated opcode execution");
+        assert_eq!(
+            cpu.registers().pc,
+            0x0101,
+            "HALT bug should suppress the next opcode fetch increment once"
+        );
+
+        let second_inc_cycles = cpu.step(&mut bus);
+
+        assert_eq!(
+            second_inc_cycles,
+            Ok(TCycles(4)),
+            "second INC A should execute from the same address"
+        );
+        assert_eq!(
+            cpu.registers().a,
+            0x12,
+            "same opcode should be executed twice"
+        );
+        assert_eq!(
+            cpu.registers().pc,
+            0x0102,
+            "fetching should return to normal after the one repeated opcode"
         );
     }
 

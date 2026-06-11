@@ -1,5 +1,43 @@
 # Milestones
 
+## 0041: Implement DMG HALT bug
+
+Date: 2026-06-11
+
+Status: Complete
+
+### Goal
+
+Use the blargg `halt_bug.gb` failure to add the DMG HALT bug behaviour without changing the broader CPU/bus timing model.
+
+### Changes
+
+- Added CPU state for the one-instruction HALT bug fetch quirk.
+- Made `HALT` avoid entering the halted state when `IME` is clear and an enabled interrupt is already requested.
+- Repeated the next opcode fetch once by suppressing the following `PC` increment.
+
+### Tests
+
+- `cargo test -p gb-core halt_bug`
+- `cargo test -p gb-core halt_pauses`
+- `cargo run -p gb-romtest -- run --rom test-roms/blargg/halt_bug.gb --target dmg --format both --jobs 1 --case-timeout-seconds 20`
+- `cargo run -p gb-romtest -- run --suite blargg --target dmg --format both --jobs 8 --case-timeout-seconds 20`
+- `cargo fmt`
+- `cargo test`
+- `cargo clippy --all-targets --all-features`
+- Added `cpu::tests::halt_bug_repeats_next_opcode_fetch_when_ime_is_clear_and_interrupt_pending`.
+
+### Decisions
+
+- Kept the quirk local to CPU fetch state; no bus ownership or timing architecture changed.
+- Added no dependencies.
+
+### Notes
+
+- `blargg/halt_bug.gb` now passes.
+- Fresh blargg suite run improved from 14 to 15 passed; remaining non-audio failures are memory timing and OAM bug tests.
+- The memory timing failures point toward future intra-instruction bus timing work.
+
 ## 0040: Add APU and desktop sound output
 
 Date: 2026-06-11

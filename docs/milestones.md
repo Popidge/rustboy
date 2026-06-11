@@ -1,5 +1,36 @@
 # Milestones
 
+## 0042: Document accuracy timing architecture
+
+Date: 2026-06-11
+
+Status: Complete
+
+### Goal
+
+Pause broad feature work and define the next architecture direction for timing-focused emulator accuracy.
+
+### Changes
+
+- Added `docs/timing-architecture.md` describing ordered CPU bus cycles, timer edge behaviour, stateful OAM DMA, PPU access restrictions, interrupt timing, and focused ROM-test gates.
+- Updated `AGENTS.md` to mark the project as entering an accuracy-first phase.
+- Updated architecture, testing strategy, and roadmap docs to point future work at the new timing model.
+
+### Tests
+
+- `cargo fmt --check`
+- Documentation-only milestone; no Rust behaviour or tests changed.
+
+### Decisions
+
+- Kept the existing ownership boundaries: `GameBoy` owns `Cpu` and `Bus`, and CPU memory access still goes through `Bus`.
+- Treated instruction-after-the-fact bus ticking as historical baseline, not the accuracy target.
+- Chose focused ROM gates over full-suite pass/fail as the milestone acceptance style for timing work.
+
+### Notes
+
+- Next suggested milestone: introduce clocked CPU bus access helpers without converting every instruction at once.
+
 ## 0041: Implement DMG HALT bug
 
 Date: 2026-06-11

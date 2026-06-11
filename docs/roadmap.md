@@ -1,5 +1,18 @@
 # Roadmap
 
+## Current phase
+
+Milestones 0001 through 0041 built the broad emulator surface: CPU execution,
+bus routing, cartridge support, timers, interrupts, serial output, PPU
+rendering, joypad input, save RAM, APU output, desktop support, and ROM-test
+tooling.
+
+The project is now in an accuracy-first phase. New work should generally follow
+`docs/timing-architecture.md`: rebuild timing around ordered CPU bus cycles,
+timer edge behaviour, stateful DMA, PPU access restrictions, STAT timing, and
+eventually pixel FIFO accuracy. Treat the stage list below as historical context
+for how the emulator was built, not the primary plan for current work.
+
 ## Guiding rule
 
 Each milestone should have:

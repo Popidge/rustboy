@@ -1,8 +1,10 @@
 # AGENTS.md
 
-This project is a learning-first, agent-assisted DMG Game Boy emulator written in Rust.
+This project is an agent-assisted DMG Game Boy emulator written in Rust.
 
-The goal is not merely to produce an emulator. The goal is to build one in a way that helps the human maintainer understand emulator architecture, Rust ownership, hardware modelling, testing, and key technical decisions.
+The early project goal was learning-first construction: build the emulator in a way that helped the human maintainer understand emulator architecture, Rust ownership, hardware modelling, testing, and key technical decisions.
+
+The project has now moved into an accuracy-first phase. The core emulator exists; future work should strengthen the timing and hardware model instead of adding broad surface area or cheap compatibility patches.
 
 Agents should act as careful pair programmers, not autonomous code volcanoes.
 
@@ -20,7 +22,7 @@ Initial target:
 * Start with no audio, then add APU later
 * Support ROM-only first
 * Add MBC1, then MBC3/MBC5
-* Prioritise correctness, tests, and understandability
+* Prioritise accuracy, correctness, tests, and understandability
 
 The emulator should eventually support:
 
@@ -43,6 +45,7 @@ The emulator should eventually support:
 Before making architectural changes, read:
 
 * `docs/architecture.md`
+* `docs/timing-architecture.md`
 * `docs/styleguide.md`
 * `docs/testing-strategy.md`
 
@@ -64,6 +67,8 @@ Prefer incremental progress over large rewrites.
 
 Do not implement multiple unrelated subsystems in one change.
 
+In the accuracy phase, prefer hardware-model improvements over behaviour-targeted hacks. If a test ROM failure points to missing timing architecture, stop and model the timing instead of special-casing the symptom.
+
 ## Agent behaviour rules
 
 Agents must:
@@ -79,7 +84,8 @@ Agents must:
 9. Avoid broad dependency additions.
 10. Preserve clear ownership boundaries between CPU, bus, and hardware components.
 11. Keep CPU memory access routed through `Bus`.
-12. Update record keeping after each milestone.
+12. Advance hardware at the bus-cycle boundary for timing work rather than only after whole CPU instructions.
+13. Update record keeping after each milestone.
 
 ## Coding standards
 
@@ -94,6 +100,7 @@ Important defaults:
 * Runtime hardware reads generally return `u8`.
 * Setup/parsing operations use `Result`.
 * Cycle units should be explicit.
+* CPU-visible memory access should move toward clocked bus-cycle helpers.
 * Hardware modes should use enums internally.
 * Bitflag-heavy registers should have wrappers or focused helper methods.
 
@@ -109,6 +116,7 @@ Important defaults:
 * `Bus` owns cartridge, PPU, timer, joypad, serial, APU, WRAM, HRAM, and interrupt registers.
 * CPU does not directly access PPU, cartridge, timer, joypad, serial, or APU.
 * All CPU reads and writes go through the bus.
+* Timing-sensitive CPU reads, writes, fetches, and idle cycles should advance bus-owned hardware in order.
 
 ## Record keeping
 

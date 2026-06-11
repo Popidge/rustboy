@@ -85,6 +85,22 @@ PPU tests should start with data-level assertions:
 
 Full screenshot comparisons can come later. Store generated screenshots outside git by default, under `screenshots/`.
 
+### Accuracy ROM gates
+
+The accuracy phase should use focused external ROM gates. Do not treat the whole
+local ROM inventory as the pass/fail condition for every timing milestone.
+
+Choose a small set that matches the subsystem being changed:
+
+* CPU bus sequencing: Blargg `instr_timing`, `mem_timing`, and focused generated ROM tests.
+* Timer: Mooneye timer acceptance tests plus timer unit tests for DIV/TAC/TIMA edge cases.
+* Interrupts and HALT: Blargg `halt_bug`, AGE halt tests, and Mooneye interrupt timing tests.
+* DMA: Mooneye `oam_dma_*`, Blargg memory timing, and GBMicrotest DMA cases.
+* PPU bus access and STAT: AGE `vram`, `oam`, `stat`, and GBMicrotest PPU/STAT cases.
+
+Record the exact ROM gates used in the milestone entry. If a gate remains
+failing, record the observed failure and the next suspected hardware rule.
+
 ## Agent-Friendly Failure Style
 
 Assertions should expose the hardware context:
@@ -159,3 +175,10 @@ Every emulator milestone should include one of:
 * A test-helper improvement that makes future behaviour easier to test.
 
 Milestone records should list the exact commands run and any skipped optional checks.
+
+For timing milestones, the record should also name:
+
+* The timing rule being modelled.
+* The external ROM gates used, if any.
+* Whether the change is foundational or a compatibility patch.
+* Any remaining ordering uncertainty.

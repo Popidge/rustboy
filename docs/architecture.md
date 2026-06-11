@@ -2,7 +2,7 @@
 
 This document describes the intended architecture for the DMG Game Boy emulator.
 
-The project goal is to build a learning-first, agent-assisted emulator in Rust. The emulator should be accurate enough to run real non-colour Game Boy software, while remaining understandable, testable, and pleasant to work on.
+The project began as a learning-first, agent-assisted emulator in Rust. The emulator has now reached the phase where the main architectural pressure is accuracy: making CPU, bus, timer, DMA, interrupts, and PPU behaviour line up in time. It should remain understandable, testable, and pleasant to work on while becoming accurate enough to run real non-colour Game Boy software.
 
 The architecture should model the Game Boy as a collection of owned hardware components connected through a memory bus.
 
@@ -14,6 +14,7 @@ The architecture should model the Game Boy as a collection of owned hardware com
 * Prefer explicit, readable code over clever generated code during the learning phase.
 * Use Rust types to encode hardware invariants where they genuinely prevent confusion.
 * Keep each milestone small, testable, and reviewable.
+* Prefer hardware-model accuracy over behaviour-specific compatibility hacks.
 * Avoid global mutable state.
 * Avoid permanent references between hardware components.
 * Avoid `unsafe` code unless explicitly approved and documented.
@@ -129,11 +130,15 @@ The CPU should be stepped by temporarily borrowing the bus:
 impl GameBoy {
     pub fn step(&mut self) -> TCycles {
         let cycles = self.cpu.step(&mut self.bus);
-        self.bus.tick(cycles);
         cycles
     }
 }
 ```
+
+Early milestones ticked the bus after a whole instruction. Accuracy milestones
+should instead move CPU execution toward clocked bus-cycle helpers, so timer,
+PPU, DMA, and interrupt side effects can observe events inside an instruction.
+See `docs/timing-architecture.md` for the timing direction.
 
 Do not make `Cpu` permanently own or borrow the bus.
 
@@ -311,7 +316,9 @@ During the learning phase:
 * Instruction helpers should be small and testable.
 * Shared ALU helpers are encouraged.
 
-Each instruction should return consumed cycles using the chosen cycle type.
+Each instruction should return consumed cycles using the chosen cycle type. For
+timing-sensitive work, instruction helpers should also preserve the order of
+fetches, reads, writes, and internal cycles by using clocked bus helpers.
 
 ## Cycle units
 
@@ -333,9 +340,10 @@ pub struct MCycles(pub u32);
 
 Do not use a naked `u32` named `cycles` in public APIs without documenting whether it represents T-cycles or M-cycles.
 
-## Bus ticking
+## Bus timing
 
-After the CPU executes an instruction, the bus advances hardware components by the consumed cycles.
+The bus owns hardware timing. Earlier implementation milestones advanced
+hardware after each whole instruction:
 
 ```rust
 impl Bus {
@@ -346,6 +354,11 @@ impl Bus {
     }
 }
 ```
+
+That model is now a baseline only. Accuracy work should advance hardware during
+CPU-visible machine cycles through bus-owned helpers such as opcode fetch,
+memory read, memory write, and internal idle. This keeps ordering decisions in
+`Bus` while preserving the rule that CPU memory access goes through the bus.
 
 Components should not permanently borrow `InterruptFlags`. They should either:
 
@@ -508,7 +521,7 @@ The timer owns:
 * TIMA
 * TMA
 * TAC
-* Internal counters needed to model timing
+* Internal divider state needed to model timing
 
 Timer registers:
 
@@ -524,6 +537,9 @@ The timer advances through `Timer::tick`.
 When TIMA overflows, the timer requests the Timer interrupt.
 
 The timer should not directly mutate the CPU.
+
+Accuracy work should model TIMA increments from selected DIV-bit falling edges,
+including DIV/TAC write effects and delayed overflow reload behaviour.
 
 ## Joypad
 
@@ -680,10 +696,11 @@ Useful future debug tools:
 6. Components do not store references to each other.
 7. Prefer enums for finite hardware states.
 8. Prefer newtypes for cycle units and important bitflag surfaces.
-9. Runtime bus reads return `u8`, not `Result<u8, _>`.
-10. ROM loading, parsing, and setup errors should use `Result`.
-11. Unknown or unimplemented opcodes must include PC and opcode in the error.
-12. No `unsafe` code in `gb-core` unless explicitly approved and documented.
-13. No `Rc<RefCell<T>>` in `gb-core` unless explicitly justified.
-14. All instruction groups require tests.
-15. All milestone work should update milestone records.
+9. Timing-sensitive CPU bus access should advance hardware in the order the CPU performs fetches, reads, writes, and internal cycles.
+10. Runtime bus reads return `u8`, not `Result<u8, _>`.
+11. ROM loading, parsing, and setup errors should use `Result`.
+12. Unknown or unimplemented opcodes must include PC and opcode in the error.
+13. No `unsafe` code in `gb-core` unless explicitly approved and documented.
+14. No `Rc<RefCell<T>>` in `gb-core` unless explicitly justified.
+15. All instruction groups require tests.
+16. All milestone work should update milestone records.

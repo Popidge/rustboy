@@ -79,23 +79,23 @@ impl Apu {
     #[must_use]
     pub fn read(&self, address: u16) -> u8 {
         if matches!(address, WAVE_RAM_START..=WAVE_RAM_END) {
-            return self.wave.wave_ram[usize::from(address - WAVE_RAM_START)];
+            return self.wave.peek_wave_ram(address - WAVE_RAM_START);
         }
 
         match address {
             NR10 => self.ch1.nr0 | 0x80,
             NR11 => self.ch1.nr1 | 0x3F,
             NR12 => self.ch1.nr2,
-            NR14 => self.ch1.nr4 | 0xB8,
+            NR14 => self.ch1.nr4 | 0xBF,
             NR21 => self.ch2.nr1 | 0x3F,
             NR22 => self.ch2.nr2,
-            NR24 => self.ch2.nr4 | 0xB8,
+            NR24 => self.ch2.nr4 | 0xBF,
             NR30 => (self.wave.nr0 & 0x80) | 0x7F,
             NR32 => self.wave.nr2 | 0x9F,
-            NR34 => self.wave.nr4 | 0xB8,
+            NR34 => self.wave.nr4 | 0xBF,
             NR42 => self.noise.nr2,
             NR43 => self.noise.nr3,
-            NR44 => self.noise.nr4 | 0xB8,
+            NR44 => self.noise.nr4 | 0xBF,
             NR50 => self.nr50,
             NR51 => self.nr51,
             NR52 => {
@@ -107,6 +107,14 @@ impl Apu {
             }
             _ => 0xFF,
         }
+    }
+
+    pub fn read_cpu(&mut self, address: u16) -> u8 {
+        if matches!(address, WAVE_RAM_START..=WAVE_RAM_END) {
+            return self.wave.read_wave_ram(address - WAVE_RAM_START);
+        }
+
+        self.read(address)
     }
 
     pub fn write(&mut self, address: u16, value: u8) {
@@ -121,6 +129,13 @@ impl Apu {
         }
 
         if !self.powered {
+            match address {
+                NR11 => self.ch1.write_length_while_powered_off(value),
+                NR21 => self.ch2.write_length_while_powered_off(value),
+                NR31 => self.wave.write_length(value),
+                NR41 => self.noise.write_length(value),
+                _ => {}
+            }
             return;
         }
 
@@ -129,20 +144,28 @@ impl Apu {
             NR11 => self.ch1.write_duty_length(value),
             NR12 => self.ch1.write_envelope(value),
             NR13 => self.ch1.write_period_low(value),
-            NR14 => self.ch1.write_control(value),
+            NR14 => self
+                .ch1
+                .write_control(value, should_clock_length_on_enable(self.frame_step)),
             NR21 => self.ch2.write_duty_length(value),
             NR22 => self.ch2.write_envelope(value),
             NR23 => self.ch2.write_period_low(value),
-            NR24 => self.ch2.write_control(value),
+            NR24 => self
+                .ch2
+                .write_control(value, should_clock_length_on_enable(self.frame_step)),
             NR30 => self.wave.write_dac(value),
             NR31 => self.wave.write_length(value),
             NR32 => self.wave.write_output_level(value),
             NR33 => self.wave.write_period_low(value),
-            NR34 => self.wave.write_control(value),
+            NR34 => self
+                .wave
+                .write_control(value, should_clock_length_on_enable(self.frame_step)),
             NR41 => self.noise.write_length(value),
             NR42 => self.noise.write_envelope(value),
             NR43 => self.noise.write_polynomial(value),
-            NR44 => self.noise.write_control(value),
+            NR44 => self
+                .noise
+                .write_control(value, should_clock_length_on_enable(self.frame_step)),
             NR50 => self.nr50 = value,
             NR51 => self.nr51 = value,
             _ => {}
@@ -273,6 +296,10 @@ fn float_to_i16(value: f32) -> i16 {
     scaled.round() as i16
 }
 
+fn should_clock_length_on_enable(frame_step: u8) -> bool {
+    frame_step % 2 == 1
+}
+
 #[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct SquareChannel {
@@ -292,6 +319,7 @@ struct SquareChannel {
     shadow_period: u16,
     sweep_timer: u8,
     sweep_enabled: bool,
+    sweep_negate_calculated: bool,
 }
 
 impl SquareChannel {
@@ -313,6 +341,7 @@ impl SquareChannel {
             shadow_period: 0,
             sweep_timer: 0,
             sweep_enabled: false,
+            sweep_negate_calculated: false,
         }
     }
 
@@ -323,12 +352,24 @@ impl SquareChannel {
 
     fn write_sweep(&mut self, value: u8) {
         if self.has_sweep {
+            if self.enabled
+                && self.sweep_negate_calculated
+                && self.nr0 & 0x08 != 0
+                && value & 0x08 == 0
+            {
+                self.enabled = false;
+            }
             self.nr0 = value & 0x7F;
         }
     }
 
     fn write_duty_length(&mut self, value: u8) {
         self.nr1 = value;
+        self.length_counter = 64 - u16::from(value & 0x3F);
+    }
+
+    fn write_length_while_powered_off(&mut self, value: u8) {
+        self.nr1 = value & 0x3F;
         self.length_counter = 64 - u16::from(value & 0x3F);
     }
 
@@ -344,10 +385,22 @@ impl SquareChannel {
         self.nr3 = value;
     }
 
-    fn write_control(&mut self, value: u8) {
+    fn write_control(&mut self, value: u8, clock_length_on_enable: bool) {
+        let length_was_disabled = self.nr4 & 0x40 == 0;
         self.nr4 = value & 0xC7;
+        if length_was_disabled
+            && value & 0x40 != 0
+            && clock_length_on_enable
+            && self.length_counter > 0
+        {
+            self.tick_length();
+        }
+        let length_was_zero = self.length_counter == 0;
         if value & 0x80 != 0 {
             self.trigger();
+            if value & 0x40 != 0 && length_was_zero && clock_length_on_enable {
+                self.tick_length();
+            }
         }
     }
 
@@ -405,16 +458,24 @@ impl SquareChannel {
             return;
         }
 
-        self.sweep_timer = self.sweep_period().max(1);
-        let shift = self.nr0 & 0x07;
-        if shift == 0 {
+        self.sweep_timer = self.sweep_timer_period();
+        if self.sweep_period() == 0 {
             return;
         }
+        let shift = self.nr0 & 0x07;
 
+        if self.nr0 & 0x08 != 0 {
+            self.sweep_negate_calculated = true;
+        }
         if let Some(new_period) = self.calculate_sweep_period() {
+            if shift == 0 {
+                return;
+            }
             self.set_period(new_period);
             self.shadow_period = new_period;
-            let _ = self.calculate_sweep_period();
+            if self.calculate_sweep_period().is_none() {
+                self.enabled = false;
+            }
         } else {
             self.enabled = false;
         }
@@ -446,8 +507,12 @@ impl SquareChannel {
         self.shadow_period = self.period();
 
         if self.has_sweep {
-            self.sweep_timer = self.sweep_period().max(1);
+            self.sweep_timer = self.sweep_timer_period();
             self.sweep_enabled = self.sweep_period() != 0 || self.sweep_shift() != 0;
+            self.sweep_negate_calculated = false;
+            if self.nr0 & 0x08 != 0 && self.sweep_shift() != 0 {
+                self.sweep_negate_calculated = true;
+            }
             if self.sweep_shift() != 0 && self.calculate_sweep_period().is_none() {
                 self.enabled = false;
             }
@@ -469,6 +534,13 @@ impl SquareChannel {
 
     fn sweep_period(&self) -> u8 {
         (self.nr0 >> 4) & 0x07
+    }
+
+    fn sweep_timer_period(&self) -> u8 {
+        match self.sweep_period() {
+            0 => 8,
+            period => period,
+        }
     }
 
     fn sweep_shift(&self) -> u8 {
@@ -506,6 +578,8 @@ struct WaveChannel {
     length_counter: u16,
     timer: u32,
     sample_index: usize,
+    playback_byte: u8,
+    wave_ram_just_read: bool,
     wave_ram: [u8; WAVE_RAM_SIZE],
 }
 
@@ -522,12 +596,41 @@ impl WaveChannel {
             length_counter: 0,
             timer: 0,
             sample_index: 0,
+            playback_byte: 0,
+            wave_ram_just_read: false,
             wave_ram: [0; WAVE_RAM_SIZE],
         }
     }
 
     fn power_off(&mut self) {
+        let wave_ram = self.wave_ram;
         *self = Self::new();
+        self.wave_ram = wave_ram;
+    }
+
+    fn read_wave_ram(&mut self, offset: u16) -> u8 {
+        if self.enabled {
+            if self.wave_ram_just_read {
+                self.wave_ram_just_read = false;
+                self.wave_ram[self.sample_index / 2]
+            } else {
+                0xFF
+            }
+        } else {
+            self.wave_ram[usize::from(offset)]
+        }
+    }
+
+    fn peek_wave_ram(&self, offset: u16) -> u8 {
+        if self.enabled {
+            if self.wave_ram_just_read {
+                self.wave_ram[self.sample_index / 2]
+            } else {
+                0xFF
+            }
+        } else {
+            self.wave_ram[usize::from(offset)]
+        }
     }
 
     fn write_dac(&mut self, value: u8) {
@@ -551,10 +654,22 @@ impl WaveChannel {
         self.nr3 = value;
     }
 
-    fn write_control(&mut self, value: u8) {
+    fn write_control(&mut self, value: u8, clock_length_on_enable: bool) {
+        let length_was_disabled = self.nr4 & 0x40 == 0;
         self.nr4 = value & 0xC7;
+        if length_was_disabled
+            && value & 0x40 != 0
+            && clock_length_on_enable
+            && self.length_counter > 0
+        {
+            self.tick_length();
+        }
+        let length_was_zero = self.length_counter == 0;
         if value & 0x80 != 0 {
             self.trigger();
+            if value & 0x40 != 0 && length_was_zero && clock_length_on_enable {
+                self.tick_length();
+            }
         }
     }
 
@@ -563,10 +678,13 @@ impl WaveChannel {
             return;
         }
 
+        self.wave_ram_just_read = false;
         let mut remaining = cycles;
         while remaining >= self.timer {
             remaining -= self.timer;
             self.sample_index = (self.sample_index + 1) & 0x1F;
+            self.playback_byte = self.wave_ram[self.sample_index / 2];
+            self.wave_ram_just_read = remaining == 0;
             self.timer = self.timer_reload();
         }
         self.timer -= remaining;
@@ -588,8 +706,8 @@ impl WaveChannel {
             return None;
         }
 
-        let byte = self.wave_ram[self.sample_index / 2];
-        let sample = if self.sample_index & 1 == 0 {
+        let byte = self.playback_byte;
+        let sample = if self.sample_index & 1 == 1 {
             byte >> 4
         } else {
             byte & 0x0F
@@ -611,6 +729,8 @@ impl WaveChannel {
         }
         self.timer = self.timer_reload();
         self.sample_index = 0;
+        self.playback_byte = self.wave_ram[0];
+        self.wave_ram_just_read = false;
     }
 
     fn period(&self) -> u16 {
@@ -675,10 +795,22 @@ impl NoiseChannel {
         self.nr3 = value;
     }
 
-    fn write_control(&mut self, value: u8) {
+    fn write_control(&mut self, value: u8, clock_length_on_enable: bool) {
+        let length_was_disabled = self.nr4 & 0x40 == 0;
         self.nr4 = value & 0xC0;
+        if length_was_disabled
+            && value & 0x40 != 0
+            && clock_length_on_enable
+            && self.length_counter > 0
+        {
+            self.tick_length();
+        }
+        let length_was_zero = self.length_counter == 0;
         if value & 0x80 != 0 {
             self.trigger();
+            if value & 0x40 != 0 && length_was_zero && clock_length_on_enable {
+                self.tick_length();
+            }
         }
     }
 
@@ -743,7 +875,7 @@ impl NoiseChannel {
         if self.length_counter == 0 {
             self.length_counter = 64;
         }
-        self.timer = self.timer_reload();
+        self.timer = (self.timer_reload() / 2).max(1);
         self.volume = self.nr2 >> 4;
         self.envelope_timer = (self.nr2 & 0x07).max(1);
         self.lfsr = 0x7FFF;
@@ -790,7 +922,7 @@ mod tests {
         assert_eq!(
             apu.read(0xFF14),
             0xFF,
-            "NR14 should read trigger and period bits as high"
+            "NR14 should preserve length and period-high bits while masking trigger high"
         );
         assert_eq!(apu.read(0xFF24), 0x76, "NR50 should roundtrip");
         assert_eq!(apu.read(0xFF25), 0xF3, "NR51 should roundtrip");
@@ -817,6 +949,130 @@ mod tests {
             0x00,
             "powered-off APU should ignore ordinary register writes"
         );
+    }
+
+    #[test]
+    fn dmg_length_registers_remain_writable_while_powered_off() {
+        let mut apu = Apu::new();
+
+        apu.write(0xFF26, 0x00);
+        apu.write(0xFF11, 0xC1);
+        apu.write(0xFF16, 0x80);
+        apu.write(0xFF1B, 0x02);
+        apu.write(0xFF20, 0x03);
+        apu.write(0xFF26, 0x80);
+
+        assert_eq!(
+            apu.ch1.nr1, 0x01,
+            "powered-off NR11 writes should keep only the length bits"
+        );
+        assert_eq!(
+            apu.ch2.nr1, 0x00,
+            "powered-off NR21 writes should not preserve square duty bits"
+        );
+        assert_eq!(
+            apu.wave.length_counter, 254,
+            "powered-off NR31 writes should update wave length"
+        );
+        assert_eq!(
+            apu.noise.length_counter, 61,
+            "powered-off NR41 writes should update noise length"
+        );
+    }
+
+    #[test]
+    fn wave_ram_survives_apu_power_cycle() {
+        let mut apu = Apu::new();
+
+        apu.write(0xFF30, 0x37);
+        apu.write(0xFF26, 0x00);
+        apu.write(0xFF26, 0x80);
+
+        assert_eq!(
+            apu.read(0xFF30),
+            0x37,
+            "APU power cycling should not clear wave RAM"
+        );
+    }
+
+    #[test]
+    fn sweep_period_zero_reloads_timer_as_eight() {
+        let mut apu = Apu::new();
+
+        apu.write(0xFF10, 0x01);
+        apu.write(0xFF12, 0x08);
+        apu.write(0xFF14, 0x80);
+
+        assert_eq!(
+            apu.ch1.sweep_timer, 8,
+            "sweep period 0 should reload the sweep timer as 8"
+        );
+    }
+
+    #[test]
+    fn sweep_second_overflow_check_disables_channel_after_update() {
+        let mut apu = Apu::new();
+
+        apu.write(0xFF10, 0x11);
+        apu.write(0xFF12, 0x08);
+        apu.write(0xFF13, 0x00);
+        apu.write(0xFF14, 0x85);
+        apu.ch1.tick_sweep();
+
+        assert_eq!(
+            apu.read(0xFF26) & 0x01,
+            0,
+            "second sweep overflow check should disable channel 1"
+        );
+    }
+
+    #[test]
+    fn sweep_exiting_negate_after_calculation_disables_channel() {
+        let mut apu = Apu::new();
+
+        apu.write(0xFF10, 0x09);
+        apu.write(0xFF12, 0x08);
+        apu.write(0xFF14, 0x80);
+        assert_eq!(apu.read(0xFF26) & 0x01, 0x01);
+
+        apu.write(0xFF10, 0x10);
+
+        assert_eq!(
+            apu.read(0xFF26) & 0x01,
+            0,
+            "leaving negate mode after a sweep subtraction calculation should disable channel 1"
+        );
+    }
+
+    #[test]
+    fn register_reads_match_blargg_dmg_sound_masks() {
+        const MASKS: [u8; 0x30] = [
+            0x80, 0x3F, 0x00, 0xFF, 0xBF, 0xFF, 0x3F, 0x00, 0xFF, 0xBF, 0x7F, 0xFF, 0x9F, 0xFF,
+            0xBF, 0xFF, 0xFF, 0x00, 0x00, 0xBF, 0x00, 0x00, 0x70, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+            0xFF, 0xFF, 0xFF, 0xFF, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        ];
+
+        let mut apu = Apu::new();
+
+        for value in 0..=u8::MAX {
+            for (offset, mask) in MASKS.iter().copied().enumerate() {
+                let address = 0xFF10 + u16::try_from(offset).expect("offset fits");
+                if address == 0xFF26 {
+                    continue;
+                }
+
+                apu.write(address, value);
+                assert_eq!(
+                    apu.read(address),
+                    value | mask,
+                    "APU read mask mismatch at 0x{address:04X} after writing 0x{value:02X}"
+                );
+
+                apu.write(0xFF25, 0);
+                apu.write(0xFF1A, 0);
+            }
+        }
     }
 
     #[test]
@@ -861,17 +1117,49 @@ mod tests {
     fn wave_ram_roundtrips_and_wave_channel_outputs_samples() {
         let mut apu = Apu::new();
         apu.write(0xFF30, 0xF0);
+        assert_eq!(apu.read(0xFF30), 0xF0, "inactive wave RAM should roundtrip");
         apu.write(0xFF1A, 0x80);
         apu.write(0xFF1C, 0x20);
         apu.write(0xFF1E, 0x80);
         apu.tick(TCycles(4_194_304 / 120));
 
-        assert_eq!(apu.read(0xFF30), 0xF0, "wave RAM should roundtrip");
         assert!(
             apu.samples()
                 .iter()
                 .any(|sample| sample.left != 0 || sample.right != 0),
             "triggered wave channel should contribute audio samples"
+        );
+    }
+
+    #[test]
+    fn active_wave_ram_reads_only_after_internal_wave_read() {
+        let mut apu = Apu::new();
+        apu.write(0xFF30, 0x12);
+        apu.write(0xFF31, 0x34);
+        apu.write(0xFF1A, 0x80);
+        apu.write(0xFF1C, 0x20);
+        apu.write(0xFF1D, 0xFF);
+        apu.write(0xFF1E, 0x87);
+
+        assert_eq!(
+            apu.read(0xFF31),
+            0xFF,
+            "active DMG wave RAM reads should be locked until an internal fetch"
+        );
+
+        apu.tick(TCycles(2));
+        assert_eq!(
+            apu.read(0xFF31),
+            0x12,
+            "active DMG wave RAM reads should expose the current byte immediately after an internal wave read"
+        );
+
+        apu.tick(TCycles(2));
+
+        assert_eq!(
+            apu.read(0xFF30),
+            0x34,
+            "active wave RAM reads should follow the current byte after another internal wave read"
         );
     }
 

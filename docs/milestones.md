@@ -1,5 +1,48 @@
 # Milestones
 
+## 0042: Improve Blargg DMG sound compatibility
+
+Date: 2026-06-11
+
+Status: Partial
+
+### Goal
+
+Continue the fix branch work toward passing Blargg's DMG sound suite, focusing on small observable APU register, length, and sweep behaviours.
+
+### Changes
+
+- Fixed APU NRx4 read masks so period-high bits are readable under Blargg's register mask expectations.
+- Preserved wave RAM across NR52 power cycles.
+- Allowed DMG length register writes while the APU is powered off for NR11, NR21, NR31, and NR41.
+- Added square sweep period-zero, second-overflow, and negate-mode behaviours.
+- Added length-enable edge clocking for channel control writes near frame sequencer length clocks.
+- Added a first-pass DMG active wave RAM read model where active reads return `0xFF` unless the wave channel just performed an internal wave RAM read.
+
+### Tests
+
+- `cargo fmt`
+- `cargo test`
+- `cargo clippy -p gb-core --all-targets --all-features`
+- `cargo clippy --all-targets --all-features` passed with warnings from the untracked `gb-romtest` `dump_fb` helper.
+- `cargo run -p gb-romtest --bin gb-romtest -- run --rom test-roms\blargg\dmg_sound\dmg_sound.gb --target dmg --include-audio --format both --jobs 1 --case-timeout-seconds 30`
+- Rendered Blargg DMG sound singles during diagnosis: `01-registers`, `03-trigger`, `04-sweep`, `05-sweep details`, `09-wave read while on`, and `11-regs after power`.
+- Added focused APU unit tests for Blargg register masks, powered-off length writes, wave RAM power persistence, active wave RAM read gating, and sweep edge behaviours.
+
+### Decisions
+
+- Kept the work scoped to `gb-core` APU behaviour and one tracked clippy cleanup in bus formatting.
+- Added no dependencies.
+- Left deterministic automation for individual Blargg `dmg_sound/rom_singles` screenshots as future harness work.
+
+### Notes
+
+- What works: `01-registers`, `03-trigger`, `04-sweep`, `05-sweep details`, and `11-regs after power` pass when rendered individually.
+- What does not work yet: the combined `dmg_sound.gb` still fails, now first reporting `Failed #9`; `09-wave read while on` has an active wave-RAM read model but still needs more precise CPU/APU phase alignment to match the expected checksum.
+- The latest `dmg_sound.gb` run reports a screenshot diff of 3017 pixels.
+- The current `09-wave read while on` output still starts at the wrong phase compared with the published `FF FF 00 FF 11...` sequence; attempts to shift CH3 start index or add a small trigger delay either duplicated `00` or returned mostly `FF`, so the next step should be a cleaner sub-cycle CPU/APU access model rather than another per-ROM special case.
+- The latest combined screen shows `01:ok 02:ok 03:ok 04:ok 05:ok 06:ok 07:ok 08:ok 09:01 10:ok 11:01 12:ok`; `11-regs after power` passes as an individual ROM, so its combined-code failure may be fallout from running after `09`.
+
 ## 0041: Implement DMG HALT bug
 
 Date: 2026-06-11

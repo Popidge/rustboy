@@ -132,10 +132,19 @@ impl Bus {
     /// Unsupported regions return `0xFF` until their hardware components exist.
     #[must_use]
     pub fn read8(&mut self, address: u16) -> u8 {
+        if matches!(address, 0xFF30..=0xFF3F) {
+            let value = self.apu.read_cpu(address);
+            self.pending_tick += 4;
+            self.timer.tick(TCycles(4), &mut self.interrupt_flags);
+            self.ppu.tick(TCycles(4), &mut self.interrupt_flags);
+            self.tick_apu_bus_access();
+            return value;
+        }
+
         self.pending_tick += 4;
         self.timer.tick(TCycles(4), &mut self.interrupt_flags);
         self.ppu.tick(TCycles(4), &mut self.interrupt_flags);
-        self.apu.tick(TCycles(4));
+        self.tick_apu_bus_access();
 
         read8_body!(self, address)
     }
@@ -160,7 +169,7 @@ impl Bus {
         self.pending_tick += 4;
         self.timer.tick(TCycles(4), &mut self.interrupt_flags);
         self.ppu.tick(TCycles(4), &mut self.interrupt_flags);
-        self.apu.tick(TCycles(4));
+        self.tick_apu_bus_access();
 
         match address {
             0x0000..=0x7FFF => self.cartridge.write_rom(address, value),
@@ -174,7 +183,9 @@ impl Bus {
             }
             UNUSABLE_OAM_START..=UNUSABLE_OAM_END => {}
             JOYPAD_ADDR => self.joypad.write(value),
-            SERIAL_START..=SERIAL_END => self.serial.write(address, value, &mut self.interrupt_flags),
+            SERIAL_START..=SERIAL_END => {
+                self.serial.write(address, value, &mut self.interrupt_flags);
+            }
             TIMER_START..=TIMER_END => self.timer.write(address, value),
             INTERRUPT_FLAGS_ADDR => self.interrupt_flags.write_if(value),
             0xFF10..=0xFF3F => self.apu.write(address, value),
@@ -213,7 +224,8 @@ impl Bus {
         let remaining = cycles.0.saturating_sub(per_access);
 
         if remaining > 0 {
-            self.timer.tick(TCycles(remaining), &mut self.interrupt_flags);
+            self.timer
+                .tick(TCycles(remaining), &mut self.interrupt_flags);
             self.ppu.tick(TCycles(remaining), &mut self.interrupt_flags);
             self.apu.tick(TCycles(remaining));
         }
@@ -306,6 +318,11 @@ impl Bus {
         self.dma_active = true;
         self.dma_source = u16::from(value) << 8;
         self.dma_offset = 0;
+    }
+
+    fn tick_apu_bus_access(&mut self) {
+        self.apu.tick(TCycles(2));
+        self.apu.tick(TCycles(2));
     }
 
     /// Transfers the next byte of an in-progress OAM DMA, advancing

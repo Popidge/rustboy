@@ -1,5 +1,40 @@
 # Milestones
 
+## 0044: Convert CPU memory access by instruction group
+
+Date: 2026-06-11
+
+Status: Complete
+
+### Goal
+
+Convert load, stack, call/return, CB `(HL)`, and absolute/high-memory CPU access to ordered bus cycles in preparation for modelling SM83 fetch/execute overlap.
+
+### Changes
+
+- Added CPU operand fetch helpers that clock bus reads while preserving PC increment order.
+- Converted load, high-memory, absolute-memory, `(HL)` ALU/inc/dec, and CB `(HL)` reads/writes to `Bus` CPU-cycle helpers.
+- Converted stack push/pop, calls, returns, restarts, and related internal cycles to ordered bus reads, writes, and idle machine cycles.
+- Adjusted interrupt service idle accounting now that stack writes are clocked.
+
+### Tests
+
+- `cargo fmt`
+- `cargo test`
+- `cargo clippy --all-targets --all-features`
+- Updated the private stack helper test to call the now-clocked `pop16` with mutable bus access.
+
+### Decisions
+
+- Kept debug/test-only unclocked memory helpers available for inspection paths.
+- Treated this as foundational timing work, not a ROM-specific compatibility patch.
+- Added no dependencies.
+
+### Notes
+
+- Whole-instruction cycle totals remain unchanged; `GameBoy::step` continues ticking any unclocked remainder for instruction groups not yet converted.
+- The next timing step can focus on SM83 fetch/execute overlap and remaining internal-cycle ordering.
+
 ## 0043: Introduce clocked CPU bus access
 
 Date: 2026-06-11

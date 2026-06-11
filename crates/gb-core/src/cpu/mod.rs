@@ -145,6 +145,20 @@ impl Cpu {
         value
     }
 
+    fn fetch_operand8(&mut self, bus: &mut Bus) -> u8 {
+        let address = self.registers.pc;
+        let value = bus.cpu_read8(address);
+        self.registers.pc = self.registers.pc.wrapping_add(1);
+        value
+    }
+
+    fn fetch_operand16(&mut self, bus: &mut Bus) -> u16 {
+        let low = self.fetch_operand8(bus);
+        let high = self.fetch_operand8(bus);
+
+        u16::from_le_bytes([low, high])
+    }
+
     /// Executes one CPU instruction.
     ///
     /// # Errors
@@ -408,7 +422,7 @@ impl Cpu {
             0xF6 => Ok(self.or_a_d8(bus)),
             0xF7 => Ok(self.rst(0x30, bus)),
             0xF8 => Ok(self.ld_hl_sp_e8(bus)),
-            0xF9 => Ok(self.ld_sp_hl()),
+            0xF9 => Ok(self.ld_sp_hl(bus)),
             0xFA => Ok(self.ld_a_addr_a16(bus)),
             0xFB => Ok(self.ei()),
             0xFE => Ok(self.cp_a_d8(bus)),
@@ -489,7 +503,7 @@ impl Cpu {
             if let Some(interrupt) = pending {
                 self.ime = false;
                 self.ime_enable_pending = false;
-                for _ in 0..5 {
+                for _ in 0..3 {
                     bus.cpu_idle_mcycle();
                 }
                 bus.clear_interrupt(interrupt);
@@ -526,8 +540,8 @@ impl Cpu {
         TCycles(4)
     }
 
-    fn stop(&mut self, bus: &Bus) -> TCycles {
-        let _padding = self.fetch8(bus);
+    fn stop(&mut self, bus: &mut Bus) -> TCycles {
+        let _padding = self.fetch_operand8(bus);
         self.run_state = CpuRunState::Stopped;
 
         TCycles(4)
@@ -547,17 +561,17 @@ impl Cpu {
         }
     }
 
-    fn read_cb_operand(&self, operand: CbOperand, bus: &Bus) -> u8 {
+    fn read_cb_operand(&self, operand: CbOperand, bus: &mut Bus) -> u8 {
         match operand {
             CbOperand::Register(register) => self.read_register8(register),
-            CbOperand::AddressHl => bus.read8(self.registers.hl()),
+            CbOperand::AddressHl => bus.cpu_read8(self.registers.hl()),
         }
     }
 
     fn write_cb_operand(&mut self, operand: CbOperand, bus: &mut Bus, value: u8) {
         match operand {
             CbOperand::Register(register) => self.write_register8(register, value),
-            CbOperand::AddressHl => bus.write8(self.registers.hl(), value),
+            CbOperand::AddressHl => bus.cpu_write8(self.registers.hl(), value),
         }
     }
 
@@ -569,7 +583,7 @@ impl Cpu {
     }
 
     fn step_cb(&mut self, bus: &mut Bus) -> TCycles {
-        let opcode = self.fetch8(bus);
+        let opcode = self.fetch_operand8(bus);
         let operand = Self::cb_operand(opcode);
 
         match opcode {
@@ -693,7 +707,7 @@ impl Cpu {
         self.registers.f.set_carry(carry);
     }
 
-    fn cb_bit(&mut self, opcode: u8, operand: CbOperand, bus: &Bus) -> TCycles {
+    fn cb_bit(&mut self, opcode: u8, operand: CbOperand, bus: &mut Bus) -> TCycles {
         let bit = (opcode >> 3) & 0x07;
         let value = self.read_cb_operand(operand, bus);
 
@@ -722,8 +736,8 @@ impl Cpu {
         Self::cb_cycles(operand, 16, 8)
     }
 
-    fn ld_r_d8(&mut self, register: Register8, bus: &Bus) -> TCycles {
-        let value = self.fetch8(bus);
+    fn ld_r_d8(&mut self, register: Register8, bus: &mut Bus) -> TCycles {
+        let value = self.fetch_operand8(bus);
         self.write_register8(register, value);
 
         TCycles(8)
@@ -736,42 +750,42 @@ impl Cpu {
         TCycles(4)
     }
 
-    fn ld_r_addr_hl(&mut self, register: Register8, bus: &Bus) -> TCycles {
-        let value = bus.read8(self.registers.hl());
+    fn ld_r_addr_hl(&mut self, register: Register8, bus: &mut Bus) -> TCycles {
+        let value = bus.cpu_read8(self.registers.hl());
         self.write_register8(register, value);
 
         TCycles(8)
     }
 
     fn ld_addr_hl_r(&mut self, register: Register8, bus: &mut Bus) -> TCycles {
-        bus.write8(self.registers.hl(), self.read_register8(register));
+        bus.cpu_write8(self.registers.hl(), self.read_register8(register));
 
         TCycles(8)
     }
 
-    fn ld_a_addr_hl(&mut self, bus: &Bus) -> TCycles {
-        self.registers.a = bus.read8(self.registers.hl());
+    fn ld_a_addr_hl(&mut self, bus: &mut Bus) -> TCycles {
+        self.registers.a = bus.cpu_read8(self.registers.hl());
 
         TCycles(8)
     }
 
     fn ld_addr_hl_a(&mut self, bus: &mut Bus) -> TCycles {
-        bus.write8(self.registers.hl(), self.registers.a);
+        bus.cpu_write8(self.registers.hl(), self.registers.a);
 
         TCycles(8)
     }
 
-    fn ld_a_addr_hl_inc(&mut self, bus: &Bus) -> TCycles {
+    fn ld_a_addr_hl_inc(&mut self, bus: &mut Bus) -> TCycles {
         let address = self.registers.hl();
-        self.registers.a = bus.read8(address);
+        self.registers.a = bus.cpu_read8(address);
         self.registers.set_hl(address.wrapping_add(1));
 
         TCycles(8)
     }
 
-    fn ld_a_addr_hl_dec(&mut self, bus: &Bus) -> TCycles {
+    fn ld_a_addr_hl_dec(&mut self, bus: &mut Bus) -> TCycles {
         let address = self.registers.hl();
-        self.registers.a = bus.read8(address);
+        self.registers.a = bus.cpu_read8(address);
         self.registers.set_hl(address.wrapping_sub(1));
 
         TCycles(8)
@@ -779,7 +793,7 @@ impl Cpu {
 
     fn ld_addr_hl_inc_a(&mut self, bus: &mut Bus) -> TCycles {
         let address = self.registers.hl();
-        bus.write8(address, self.registers.a);
+        bus.cpu_write8(address, self.registers.a);
         self.registers.set_hl(address.wrapping_add(1));
 
         TCycles(8)
@@ -787,80 +801,82 @@ impl Cpu {
 
     fn ld_addr_hl_dec_a(&mut self, bus: &mut Bus) -> TCycles {
         let address = self.registers.hl();
-        bus.write8(address, self.registers.a);
+        bus.cpu_write8(address, self.registers.a);
         self.registers.set_hl(address.wrapping_sub(1));
 
         TCycles(8)
     }
 
     fn ld_addr_hl_d8(&mut self, bus: &mut Bus) -> TCycles {
-        let value = self.fetch8(bus);
-        bus.write8(self.registers.hl(), value);
+        let value = self.fetch_operand8(bus);
+        bus.cpu_write8(self.registers.hl(), value);
 
         TCycles(12)
     }
 
-    fn ld_a_addr_rr(&mut self, pair: RegisterPair, bus: &Bus) -> TCycles {
-        self.registers.a = bus.read8(self.read_register_pair(pair));
+    fn ld_a_addr_rr(&mut self, pair: RegisterPair, bus: &mut Bus) -> TCycles {
+        self.registers.a = bus.cpu_read8(self.read_register_pair(pair));
 
         TCycles(8)
     }
 
     fn ld_addr_rr_a(&mut self, pair: RegisterPair, bus: &mut Bus) -> TCycles {
-        bus.write8(self.read_register_pair(pair), self.registers.a);
+        bus.cpu_write8(self.read_register_pair(pair), self.registers.a);
 
         TCycles(8)
     }
 
-    fn ldh_a_addr_a8(&mut self, bus: &Bus) -> TCycles {
-        let offset = self.fetch8(bus);
-        self.registers.a = bus.read8(0xFF00 + u16::from(offset));
+    fn ldh_a_addr_a8(&mut self, bus: &mut Bus) -> TCycles {
+        let offset = self.fetch_operand8(bus);
+        self.registers.a = bus.cpu_read8(0xFF00 + u16::from(offset));
 
         TCycles(12)
     }
 
     fn ldh_addr_a8_a(&mut self, bus: &mut Bus) -> TCycles {
-        let offset = self.fetch8(bus);
-        bus.write8(0xFF00 + u16::from(offset), self.registers.a);
+        let offset = self.fetch_operand8(bus);
+        bus.cpu_write8(0xFF00 + u16::from(offset), self.registers.a);
 
         TCycles(12)
     }
 
-    fn ldh_a_addr_c(&mut self, bus: &Bus) -> TCycles {
-        self.registers.a = bus.read8(0xFF00 + u16::from(self.registers.c));
+    fn ldh_a_addr_c(&mut self, bus: &mut Bus) -> TCycles {
+        self.registers.a = bus.cpu_read8(0xFF00 + u16::from(self.registers.c));
 
         TCycles(8)
     }
 
     fn ldh_addr_c_a(&mut self, bus: &mut Bus) -> TCycles {
-        bus.write8(0xFF00 + u16::from(self.registers.c), self.registers.a);
+        bus.cpu_write8(0xFF00 + u16::from(self.registers.c), self.registers.a);
 
         TCycles(8)
     }
 
-    fn ld_a_addr_a16(&mut self, bus: &Bus) -> TCycles {
-        let address = self.fetch16(bus);
-        self.registers.a = bus.read8(address);
+    fn ld_a_addr_a16(&mut self, bus: &mut Bus) -> TCycles {
+        let address = self.fetch_operand16(bus);
+        self.registers.a = bus.cpu_read8(address);
 
         TCycles(16)
     }
 
     fn ld_addr_a16_a(&mut self, bus: &mut Bus) -> TCycles {
-        let address = self.fetch16(bus);
-        bus.write8(address, self.registers.a);
+        let address = self.fetch_operand16(bus);
+        bus.cpu_write8(address, self.registers.a);
 
         TCycles(16)
     }
 
     fn ld_addr_a16_sp(&mut self, bus: &mut Bus) -> TCycles {
-        let address = self.fetch16(bus);
-        bus.write16(address, self.registers.sp);
+        let address = self.fetch_operand16(bus);
+        let [low, high] = self.registers.sp.to_le_bytes();
+        bus.cpu_write8(address, low);
+        bus.cpu_write8(address.wrapping_add(1), high);
 
         TCycles(20)
     }
 
-    fn ld_rr_d16(&mut self, pair: RegisterPair, bus: &Bus) -> TCycles {
-        let value = self.fetch16(bus);
+    fn ld_rr_d16(&mut self, pair: RegisterPair, bus: &mut Bus) -> TCycles {
+        let value = self.fetch_operand16(bus);
         self.write_register_pair(pair, value);
 
         TCycles(12)
@@ -912,10 +928,10 @@ impl Cpu {
 
     fn inc_addr_hl(&mut self, bus: &mut Bus) -> TCycles {
         let address = self.registers.hl();
-        let value = bus.read8(address);
+        let value = bus.cpu_read8(address);
         let result = value.wrapping_add(1);
 
-        bus.write8(address, result);
+        bus.cpu_write8(address, result);
         self.registers.f.set_zero(result == 0);
         self.registers.f.set_subtract(false);
         self.registers
@@ -927,10 +943,10 @@ impl Cpu {
 
     fn dec_addr_hl(&mut self, bus: &mut Bus) -> TCycles {
         let address = self.registers.hl();
-        let value = bus.read8(address);
+        let value = bus.cpu_read8(address);
         let result = value.wrapping_sub(1);
 
-        bus.write8(address, result);
+        bus.cpu_write8(address, result);
         self.registers.f.set_zero(result == 0);
         self.registers.f.set_subtract(true);
         self.registers.f.set_half_carry(value.trailing_zeros() >= 4);
@@ -978,90 +994,98 @@ impl Cpu {
         TCycles(4)
     }
 
-    fn add_a_addr_hl(&mut self, bus: &Bus) -> TCycles {
-        self.alu_add(bus.read8(self.registers.hl()));
-        TCycles(8)
-    }
-
-    fn adc_a_addr_hl(&mut self, bus: &Bus) -> TCycles {
-        self.alu_adc(bus.read8(self.registers.hl()));
-        TCycles(8)
-    }
-
-    fn sub_a_addr_hl(&mut self, bus: &Bus) -> TCycles {
-        self.alu_sub(bus.read8(self.registers.hl()));
-        TCycles(8)
-    }
-
-    fn sbc_a_addr_hl(&mut self, bus: &Bus) -> TCycles {
-        self.alu_sbc(bus.read8(self.registers.hl()));
-        TCycles(8)
-    }
-
-    fn and_a_addr_hl(&mut self, bus: &Bus) -> TCycles {
-        self.alu_and(bus.read8(self.registers.hl()));
-        TCycles(8)
-    }
-
-    fn or_a_addr_hl(&mut self, bus: &Bus) -> TCycles {
-        self.alu_or(bus.read8(self.registers.hl()));
-        TCycles(8)
-    }
-
-    fn xor_a_addr_hl(&mut self, bus: &Bus) -> TCycles {
-        self.alu_xor(bus.read8(self.registers.hl()));
-        TCycles(8)
-    }
-
-    fn cp_a_addr_hl(&mut self, bus: &Bus) -> TCycles {
-        self.alu_cp(bus.read8(self.registers.hl()));
-        TCycles(8)
-    }
-
-    fn add_a_d8(&mut self, bus: &Bus) -> TCycles {
-        let value = self.fetch8(bus);
+    fn add_a_addr_hl(&mut self, bus: &mut Bus) -> TCycles {
+        let value = bus.cpu_read8(self.registers.hl());
         self.alu_add(value);
         TCycles(8)
     }
 
-    fn adc_a_d8(&mut self, bus: &Bus) -> TCycles {
-        let value = self.fetch8(bus);
+    fn adc_a_addr_hl(&mut self, bus: &mut Bus) -> TCycles {
+        let value = bus.cpu_read8(self.registers.hl());
         self.alu_adc(value);
         TCycles(8)
     }
 
-    fn sub_a_d8(&mut self, bus: &Bus) -> TCycles {
-        let value = self.fetch8(bus);
+    fn sub_a_addr_hl(&mut self, bus: &mut Bus) -> TCycles {
+        let value = bus.cpu_read8(self.registers.hl());
         self.alu_sub(value);
         TCycles(8)
     }
 
-    fn sbc_a_d8(&mut self, bus: &Bus) -> TCycles {
-        let value = self.fetch8(bus);
+    fn sbc_a_addr_hl(&mut self, bus: &mut Bus) -> TCycles {
+        let value = bus.cpu_read8(self.registers.hl());
         self.alu_sbc(value);
         TCycles(8)
     }
 
-    fn and_a_d8(&mut self, bus: &Bus) -> TCycles {
-        let value = self.fetch8(bus);
+    fn and_a_addr_hl(&mut self, bus: &mut Bus) -> TCycles {
+        let value = bus.cpu_read8(self.registers.hl());
         self.alu_and(value);
         TCycles(8)
     }
 
-    fn or_a_d8(&mut self, bus: &Bus) -> TCycles {
-        let value = self.fetch8(bus);
+    fn or_a_addr_hl(&mut self, bus: &mut Bus) -> TCycles {
+        let value = bus.cpu_read8(self.registers.hl());
         self.alu_or(value);
         TCycles(8)
     }
 
-    fn xor_a_d8(&mut self, bus: &Bus) -> TCycles {
-        let value = self.fetch8(bus);
+    fn xor_a_addr_hl(&mut self, bus: &mut Bus) -> TCycles {
+        let value = bus.cpu_read8(self.registers.hl());
         self.alu_xor(value);
         TCycles(8)
     }
 
-    fn cp_a_d8(&mut self, bus: &Bus) -> TCycles {
-        let value = self.fetch8(bus);
+    fn cp_a_addr_hl(&mut self, bus: &mut Bus) -> TCycles {
+        let value = bus.cpu_read8(self.registers.hl());
+        self.alu_cp(value);
+        TCycles(8)
+    }
+
+    fn add_a_d8(&mut self, bus: &mut Bus) -> TCycles {
+        let value = self.fetch_operand8(bus);
+        self.alu_add(value);
+        TCycles(8)
+    }
+
+    fn adc_a_d8(&mut self, bus: &mut Bus) -> TCycles {
+        let value = self.fetch_operand8(bus);
+        self.alu_adc(value);
+        TCycles(8)
+    }
+
+    fn sub_a_d8(&mut self, bus: &mut Bus) -> TCycles {
+        let value = self.fetch_operand8(bus);
+        self.alu_sub(value);
+        TCycles(8)
+    }
+
+    fn sbc_a_d8(&mut self, bus: &mut Bus) -> TCycles {
+        let value = self.fetch_operand8(bus);
+        self.alu_sbc(value);
+        TCycles(8)
+    }
+
+    fn and_a_d8(&mut self, bus: &mut Bus) -> TCycles {
+        let value = self.fetch_operand8(bus);
+        self.alu_and(value);
+        TCycles(8)
+    }
+
+    fn or_a_d8(&mut self, bus: &mut Bus) -> TCycles {
+        let value = self.fetch_operand8(bus);
+        self.alu_or(value);
+        TCycles(8)
+    }
+
+    fn xor_a_d8(&mut self, bus: &mut Bus) -> TCycles {
+        let value = self.fetch_operand8(bus);
+        self.alu_xor(value);
+        TCycles(8)
+    }
+
+    fn cp_a_d8(&mut self, bus: &mut Bus) -> TCycles {
+        let value = self.fetch_operand8(bus);
         self.alu_cp(value);
         TCycles(8)
     }
@@ -1247,8 +1271,8 @@ impl Cpu {
         TCycles(8)
     }
 
-    fn add_sp_e8(&mut self, bus: &Bus) -> TCycles {
-        let offset = self.fetch8(bus);
+    fn add_sp_e8(&mut self, bus: &mut Bus) -> TCycles {
+        let offset = self.fetch_operand8(bus);
         let result = self
             .registers
             .sp
@@ -1256,12 +1280,14 @@ impl Cpu {
 
         self.set_sp_offset_flags(self.registers.sp, offset);
         self.registers.sp = result;
+        bus.cpu_idle_mcycle();
+        bus.cpu_idle_mcycle();
 
         TCycles(16)
     }
 
-    fn ld_hl_sp_e8(&mut self, bus: &Bus) -> TCycles {
-        let offset = self.fetch8(bus);
+    fn ld_hl_sp_e8(&mut self, bus: &mut Bus) -> TCycles {
+        let offset = self.fetch_operand8(bus);
         let result = self
             .registers
             .sp
@@ -1269,12 +1295,14 @@ impl Cpu {
 
         self.set_sp_offset_flags(self.registers.sp, offset);
         self.registers.set_hl(result);
+        bus.cpu_idle_mcycle();
 
         TCycles(12)
     }
 
-    fn ld_sp_hl(&mut self) -> TCycles {
+    fn ld_sp_hl(&mut self, bus: &mut Bus) -> TCycles {
         self.registers.sp = self.registers.hl();
+        bus.cpu_idle_mcycle();
 
         TCycles(8)
     }
@@ -1290,8 +1318,9 @@ impl Cpu {
             .set_carry((sp & 0x00FF) + u16::from(offset) > 0x00FF);
     }
 
-    fn jp_a16(&mut self, bus: &Bus) -> TCycles {
-        self.registers.pc = self.fetch16(bus);
+    fn jp_a16(&mut self, bus: &mut Bus) -> TCycles {
+        self.registers.pc = self.fetch_operand16(bus);
+        bus.cpu_idle_mcycle();
 
         TCycles(16)
     }
@@ -1302,29 +1331,32 @@ impl Cpu {
         TCycles(4)
     }
 
-    fn jp_cc_a16(&mut self, condition: Condition, bus: &Bus) -> TCycles {
-        let address = self.fetch16(bus);
+    fn jp_cc_a16(&mut self, condition: Condition, bus: &mut Bus) -> TCycles {
+        let address = self.fetch_operand16(bus);
 
         if self.condition_is_met(condition) {
             self.registers.pc = address;
+            bus.cpu_idle_mcycle();
             TCycles(16)
         } else {
             TCycles(12)
         }
     }
 
-    fn jr_e8(&mut self, bus: &Bus) -> TCycles {
-        let offset = self.fetch8(bus);
+    fn jr_e8(&mut self, bus: &mut Bus) -> TCycles {
+        let offset = self.fetch_operand8(bus);
         self.relative_jump(offset);
+        bus.cpu_idle_mcycle();
 
         TCycles(12)
     }
 
-    fn jr_cc_e8(&mut self, condition: Condition, bus: &Bus) -> TCycles {
-        let offset = self.fetch8(bus);
+    fn jr_cc_e8(&mut self, condition: Condition, bus: &mut Bus) -> TCycles {
+        let offset = self.fetch_operand8(bus);
 
         if self.condition_is_met(condition) {
             self.relative_jump(offset);
+            bus.cpu_idle_mcycle();
             TCycles(12)
         } else {
             TCycles(8)
@@ -1339,7 +1371,8 @@ impl Cpu {
     }
 
     fn call_a16(&mut self, bus: &mut Bus) -> TCycles {
-        let address = self.fetch16(bus);
+        let address = self.fetch_operand16(bus);
+        bus.cpu_idle_mcycle();
         self.push16(bus, self.registers.pc);
         self.registers.pc = address;
 
@@ -1347,9 +1380,10 @@ impl Cpu {
     }
 
     fn call_cc_a16(&mut self, condition: Condition, bus: &mut Bus) -> TCycles {
-        let address = self.fetch16(bus);
+        let address = self.fetch_operand16(bus);
 
         if self.condition_is_met(condition) {
+            bus.cpu_idle_mcycle();
             self.push16(bus, self.registers.pc);
             self.registers.pc = address;
             TCycles(24)
@@ -1358,22 +1392,26 @@ impl Cpu {
         }
     }
 
-    fn ret(&mut self, bus: &Bus) -> TCycles {
+    fn ret(&mut self, bus: &mut Bus) -> TCycles {
         self.registers.pc = self.pop16(bus);
+        bus.cpu_idle_mcycle();
 
         TCycles(16)
     }
 
-    fn reti(&mut self, bus: &Bus) -> TCycles {
+    fn reti(&mut self, bus: &mut Bus) -> TCycles {
         self.registers.pc = self.pop16(bus);
         self.ime = true;
+        bus.cpu_idle_mcycle();
 
         TCycles(16)
     }
 
-    fn ret_cc(&mut self, condition: Condition, bus: &Bus) -> TCycles {
+    fn ret_cc(&mut self, condition: Condition, bus: &mut Bus) -> TCycles {
+        bus.cpu_idle_mcycle();
         if self.condition_is_met(condition) {
             self.registers.pc = self.pop16(bus);
+            bus.cpu_idle_mcycle();
             TCycles(20)
         } else {
             TCycles(8)
@@ -1381,6 +1419,7 @@ impl Cpu {
     }
 
     fn rst(&mut self, vector: u16, bus: &mut Bus) -> TCycles {
+        bus.cpu_idle_mcycle();
         self.push16(bus, self.registers.pc);
         self.registers.pc = vector;
 
@@ -1388,12 +1427,13 @@ impl Cpu {
     }
 
     fn push_rr(&mut self, pair: StackRegisterPair, bus: &mut Bus) -> TCycles {
+        bus.cpu_idle_mcycle();
         self.push16(bus, self.read_stack_register_pair(pair));
 
         TCycles(16)
     }
 
-    fn pop_rr(&mut self, pair: StackRegisterPair, bus: &Bus) -> TCycles {
+    fn pop_rr(&mut self, pair: StackRegisterPair, bus: &mut Bus) -> TCycles {
         let value = self.pop16(bus);
         self.write_stack_register_pair(pair, value);
 
@@ -1419,15 +1459,20 @@ impl Cpu {
     }
 
     fn push16(&mut self, bus: &mut Bus, value: u16) {
-        self.registers.sp = self.registers.sp.wrapping_sub(2);
-        bus.write16(self.registers.sp, value);
+        let [low, high] = value.to_le_bytes();
+        self.registers.sp = self.registers.sp.wrapping_sub(1);
+        bus.cpu_write8(self.registers.sp, high);
+        self.registers.sp = self.registers.sp.wrapping_sub(1);
+        bus.cpu_write8(self.registers.sp, low);
     }
 
-    fn pop16(&mut self, bus: &Bus) -> u16 {
-        let value = bus.read16(self.registers.sp);
-        self.registers.sp = self.registers.sp.wrapping_add(2);
+    fn pop16(&mut self, bus: &mut Bus) -> u16 {
+        let low = bus.cpu_read8(self.registers.sp);
+        self.registers.sp = self.registers.sp.wrapping_add(1);
+        let high = bus.cpu_read8(self.registers.sp);
+        self.registers.sp = self.registers.sp.wrapping_add(1);
 
-        value
+        u16::from_le_bytes([low, high])
     }
 
     fn condition_is_met(&self, condition: Condition) -> bool {
@@ -2967,7 +3012,7 @@ mod tests {
             "push16 should store high byte second"
         );
 
-        let value = cpu.pop16(&bus);
+        let value = cpu.pop16(&mut bus);
 
         assert_eq!(value, 0x1234, "pop16 should read the pushed value");
         assert_eq!(cpu.registers().sp, 0xC100, "pop16 should restore SP by two");

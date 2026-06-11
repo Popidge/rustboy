@@ -44,6 +44,13 @@ enum CpuRunState {
     Stopped,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PrefetchedOpcode {
+    pc: u16,
+    opcode: u8,
+    suppress_pc_increment: bool,
+}
+
 /// CPU cycle count measured in Game Boy T-cycles.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct TCycles(pub u32);
@@ -78,6 +85,7 @@ pub struct Cpu {
     ime_enable_pending: bool,
     halt_bug_pending: bool,
     run_state: CpuRunState,
+    prefetched_opcode: Option<PrefetchedOpcode>,
 }
 
 impl Cpu {
@@ -93,6 +101,7 @@ impl Cpu {
             ime_enable_pending: false,
             halt_bug_pending: false,
             run_state: CpuRunState::Running,
+            prefetched_opcode: None,
         }
     }
 
@@ -138,11 +147,52 @@ impl Cpu {
         u16::from_le_bytes([low, high])
     }
 
-    fn fetch_opcode(&mut self, bus: &mut Bus) -> u8 {
-        let address = self.registers.pc;
-        let value = bus.cpu_fetch8(address);
+    fn bootstrap_prefetched_opcode(&mut self, bus: &Bus) -> PrefetchedOpcode {
+        let pc = self.registers.pc;
+        let opcode = bus.read8(pc);
         self.registers.pc = self.registers.pc.wrapping_add(1);
-        value
+
+        PrefetchedOpcode {
+            pc,
+            opcode,
+            suppress_pc_increment: false,
+        }
+    }
+
+    fn take_prefetched_opcode(&mut self, bus: &Bus) -> PrefetchedOpcode {
+        let prefetched = self
+            .prefetched_opcode
+            .take()
+            .unwrap_or_else(|| self.bootstrap_prefetched_opcode(bus));
+
+        if prefetched.suppress_pc_increment {
+            self.registers.pc = prefetched.pc;
+        } else {
+            self.registers.pc = prefetched.pc.wrapping_add(1);
+        }
+
+        prefetched
+    }
+
+    fn prefetch_next_opcode(&mut self, bus: &mut Bus) {
+        if self.run_state != CpuRunState::Running {
+            self.prefetched_opcode = None;
+            return;
+        }
+
+        let pc = self.registers.pc;
+        let opcode = bus.cpu_fetch8(pc);
+        let suppress_pc_increment = self.halt_bug_pending;
+
+        if self.halt_bug_pending {
+            self.halt_bug_pending = false;
+        }
+
+        self.prefetched_opcode = Some(PrefetchedOpcode {
+            pc,
+            opcode,
+            suppress_pc_increment,
+        });
     }
 
     fn fetch_operand8(&mut self, bus: &mut Bus) -> u8 {
@@ -173,13 +223,7 @@ impl Cpu {
 
         let enable_ime_after_step = self.ime_enable_pending;
         self.ime_enable_pending = false;
-        let pc = self.registers.pc;
-        let opcode = if self.halt_bug_pending {
-            self.halt_bug_pending = false;
-            bus.cpu_fetch8(pc)
-        } else {
-            self.fetch_opcode(bus)
-        };
+        let PrefetchedOpcode { pc, opcode, .. } = self.take_prefetched_opcode(bus);
 
         let result = match opcode {
             0x00 => Ok(TCycles(4)),
@@ -434,6 +478,10 @@ impl Cpu {
             self.ime = true;
         }
 
+        if result.is_ok() {
+            self.prefetch_next_opcode(bus);
+        }
+
         result
     }
 
@@ -491,6 +539,7 @@ impl Cpu {
         let pending = bus.pending_interrupt();
 
         if self.run_state == CpuRunState::Halted && pending.is_none() {
+            self.prefetched_opcode = None;
             bus.cpu_idle_mcycle();
             return Some(TCycles(4));
         }
@@ -501,6 +550,7 @@ impl Cpu {
 
         if self.ime {
             if let Some(interrupt) = pending {
+                self.prefetched_opcode = None;
                 self.ime = false;
                 self.ime_enable_pending = false;
                 for _ in 0..3 {
@@ -1646,6 +1696,65 @@ mod tests {
             cpu.registers().pc,
             0x0101,
             "NOP should leave PC after the opcode byte"
+        );
+    }
+
+    #[test]
+    fn step_prefetches_next_opcode_at_execute_tail() {
+        let mut bus = bus_with_bytes(&[]);
+        bus.write8(0xC000, 0x00);
+        bus.write8(0xC001, 0x3C);
+        let mut cpu = Cpu::new_dmg_post_boot();
+        cpu.registers.pc = 0xC000;
+        cpu.registers.a = 0x10;
+
+        let cycles = cpu.step(&mut bus);
+
+        assert_eq!(cycles, Ok(TCycles(4)), "NOP should take 4 T-cycles");
+        assert_eq!(
+            bus.clocked_cpu_cycles(),
+            TCycles(4),
+            "NOP should clock the overlapped fetch of the next opcode"
+        );
+        assert_eq!(
+            cpu.registers().pc,
+            0xC001,
+            "visible PC should remain at the prefetched opcode address"
+        );
+
+        bus.write8(0xC001, 0x3D);
+        let cycles = cpu.step(&mut bus);
+
+        assert_eq!(
+            cycles,
+            Ok(TCycles(4)),
+            "prefetched INC A should execute even if memory changes afterward"
+        );
+        assert_eq!(
+            cpu.registers().a,
+            0x11,
+            "the second step should consume the prefetched INC A opcode"
+        );
+    }
+
+    #[test]
+    fn operand_read_and_tail_fetch_cover_immediate_instruction_cycles() {
+        let mut bus = bus_with_bytes(&[(0x0100, 0x06), (0x0101, 0x42), (0x0102, 0x00)]);
+        let mut cpu = Cpu::new_dmg_post_boot();
+
+        let cycles = cpu.step(&mut bus);
+
+        assert_eq!(cycles, Ok(TCycles(8)), "LD B,d8 should take 8 T-cycles");
+        assert_eq!(
+            bus.clocked_cpu_cycles(),
+            TCycles(8),
+            "LD B,d8 should clock its operand read and overlapped next fetch"
+        );
+        assert_eq!(cpu.registers().b, 0x42, "LD B,d8 should load B");
+        assert_eq!(
+            cpu.registers().pc,
+            0x0102,
+            "visible PC should point at the prefetched next opcode"
         );
     }
 
@@ -3104,6 +3213,7 @@ mod tests {
     #[test]
     fn call_pushes_return_address_and_ret_restores_it() {
         let mut bus = bus_with_bytes(&[(0x0100, 0xCD), (0x0101, 0x00), (0x0102, 0xC2)]);
+        bus.write8(0xC200, 0xC9);
         let mut cpu = Cpu::new_dmg_post_boot();
         cpu.registers.sp = 0xC100;
 
@@ -3122,7 +3232,6 @@ mod tests {
             "CALL should push the address after its operand"
         );
 
-        bus.write8(0xC200, 0xC9);
         let cycles = cpu.step(&mut bus);
 
         assert_eq!(cycles, Ok(TCycles(16)), "RET should take 16 T-cycles");

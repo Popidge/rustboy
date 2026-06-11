@@ -1,5 +1,44 @@
 # Milestones
 
+## 0044b: Model SM83 fetch/execute overlap
+
+Date: 2026-06-11
+
+Status: Complete
+
+### Goal
+
+Model the SM83 opcode fetch as an overlapped tail fetch for the next logical instruction while preserving public instruction cycle totals.
+
+### Changes
+
+- Added a CPU prefetched-opcode slot consumed at the start of each logical instruction.
+- Moved successful instruction execution to clock the next opcode fetch at the execute tail.
+- Preserved visible `PC` as the prefetched opcode address until that opcode is consumed.
+- Kept HALT bug repeated-opcode behaviour working through the prefetched slot.
+
+### Tests
+
+- `cargo fmt`
+- `cargo test -p gb-core cpu::tests`
+- `cargo test`
+- `cargo clippy --all-targets --all-features`
+- `cargo run -p gb-romtest -- run --rom test-roms/blargg/cpu_instrs/cpu_instrs.gb --target dmg --format both --jobs 1 --case-timeout-seconds 60`
+- `cargo run -p gb-romtest -- run --rom test-roms/blargg/instr_timing/instr_timing.gb --target dmg --format both --jobs 1 --case-timeout-seconds 60`
+- `cargo run -p gb-romtest -- run --rom test-roms/blargg/halt_bug.gb --target dmg --format both --jobs 1 --case-timeout-seconds 60`
+- Added CPU tests for tail opcode prefetch and immediate operand read plus overlapped next fetch cycle accounting.
+
+### Decisions
+
+- Treated this as foundational timing work, not a ROM-specific compatibility patch.
+- Bootstrapped the first post-boot opcode with an unclocked read so the seeded post-boot CPU state starts with an already-primed pipeline.
+- Added no dependencies.
+
+### Notes
+
+- The model now makes late writes to an already-prefetched opcode invisible to the following step, matching the overlap direction.
+- Remaining timing work should refine interrupt discard/prefetch edge ordering and more exact internal-cycle placement as focused ROM gates demand.
+
 ## 0044: Convert CPU memory access by instruction group
 
 Date: 2026-06-11

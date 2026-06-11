@@ -1,5 +1,219 @@
 # Milestones
 
+## 0039: Resolve remaining unsupported ROM registry gaps
+
+Date: 2026-06-11
+
+Status: Complete
+
+### Goal
+
+Use suite source/docs to classify the remaining unsupported DMG-profile ROMs more accurately.
+
+### Changes
+
+- Classified Mealybug `mbc3_rtc.gb` as a Fibonacci breakpoint-register test based on its base harness result flow.
+- Allowed golden lookup to match ROM/PNG stems across separator differences such as `statcount-auto` and `statcount_auto`.
+- Treated Mealybug `win_without_bg.gb` as a known skipped screenshot artifact when no local golden PNG is present.
+
+### Tests
+
+- `cargo fmt`
+- `cargo fmt --check`
+- `cargo test`
+- `cargo clippy --all-targets --all-features`
+- `cargo run -p gb-romtest -- run --rom test-roms/mealybug-tearoom-tests/mbc/mbc3_rtc.gb --target dmg --format both --jobs 1 --case-timeout-seconds 15`
+- `cargo run -p gb-romtest -- run --suite scribbltests --target dmg --format both --jobs 4 --case-timeout-seconds 20`
+- `cargo run -p gb-romtest -- run --suite mealybug-tearoom-tests --target dmg --format both --jobs 8 --case-timeout-seconds 20`
+- Added runner unit tests for `mbc3_rtc` classification, flexible golden lookup, and known missing-golden skip classification.
+
+### Decisions
+
+- Did not invent a synthetic `win_without_bg` golden from source; exact visual comparison still needs a real reference PNG.
+- Added no dependencies.
+
+### Notes
+
+- References used: local `mbc3_rtc.asm`, local `win_without_bg.asm`, and Scribbltests STATcount README.
+- Targeted Mealybug and Scribbltests runs now report zero unsupported entries.
+
+## 0038: Tighten test ROM harness classification
+
+Date: 2026-06-11
+
+Status: Complete
+
+### Goal
+
+Fix obvious `gb-romtest` harness/reporting issues found in the DMG profile report before treating remaining failures as emulator bugs.
+
+### Changes
+
+- Report breakpoint-register cases as `Timeout` when the suite breakpoint is not reached instead of evaluating stale registers.
+- Added Wilbertpol Mooneye support for the legacy `0xED` undefined-opcode exit condition.
+- Tightened DMG profile filtering for CGB-only, SGB-only, HDMA/GDMA, speed-switch, `ncm`, and loose root ROM cases.
+- Expanded `rtc3test/rtc3test.gb` into basic, range, and sub-second scripted screenshot subtests.
+- Preserved report target/profile values from the active runner options.
+
+### Tests
+
+- `cargo fmt`
+- `cargo fmt --check`
+- `cargo test -p gb-romtest`
+- `cargo test`
+- `cargo clippy --all-targets --all-features`
+- `cargo run -p gb-romtest -- run --suite rtc3test --target dmg --format both --jobs 3 --case-timeout-seconds 5`
+- Added runner unit tests for timeout classification, model filtering, loose root ROM exclusion, Wilbertpol breakpoints, and `rtc3test` expansion.
+
+### Decisions
+
+- Kept dual-labelled AGE ROMs that include a DMG marker in the DMG profile.
+- Represented `rtc3test` subtests as logical cases that share one ROM path but use distinct report paths and goldens.
+- Added no dependencies.
+
+### Notes
+
+- Remaining report failures should now have less obvious harness noise before emulator subsystem triage.
+- The short `rtc3test` validation produced three screenshot failures, which is expected until MBC3 RTC behaviour is implemented.
+
+## 0037: Parallelize test ROM runner
+
+Date: 2026-06-11
+
+Status: Complete
+
+### Goal
+
+Speed up `gb-romtest` by running independent ROM cases through a worker queue and using the release build for test execution.
+
+### Changes
+
+- Added a central dispatcher with a shared work queue, worker threads, ordered result collection, and terminal progress output.
+- Added `--jobs N` and `--case-timeout-seconds N` runner options.
+- Added per-ROM wall-clock timeout handling in addition to existing emulated-time budgets.
+- Made debug invocations build `gb-romtest` in release mode first, then re-run the requested test command through `target/release/gb-romtest`.
+
+### Tests
+
+- `cargo test -p gb-romtest`
+- `cargo run -p gb-romtest -- run --profile smoke --target dmg --format both --jobs 4 --case-timeout-seconds 30`
+- `cargo fmt`
+- `cargo fmt --check`
+- `cargo test`
+- `cargo clippy --all-targets --all-features`
+
+### Decisions
+
+- Kept report writing centralized after workers return results, so JSON and Markdown generation remain deterministic.
+- Preserved discovery order in reports even though cases complete out of order.
+- Used standard-library threads and channels instead of adding a dependency.
+
+### Notes
+
+- The smoke command now prints per-ROM progress as workers finish.
+- The release-backed smoke run still reports 5 passed and 2 GBMicrotest timeouts.
+
+## 0036: Refine GBMicrotest result handling
+
+Date: 2026-06-11
+
+Status: Complete
+
+### Goal
+
+Align `gb-romtest` GBMicrotest handling with the upstream result contract for `0xFF80..=0xFF82`.
+
+### Changes
+
+- Added early stopping when GBMicrotest writes `0x01` or `0xFF` to `0xFF82`.
+- Expanded RAM-signature reports to include `0xFF80` actual result, `0xFF81` expected result, and `0xFF82` pass/fail status.
+
+### Tests
+
+- `cargo test -p gb-romtest ram_signature`
+- `cargo run -p gb-romtest -- run --profile smoke --format both`
+- `cargo fmt --check`
+- `cargo test`
+- `cargo clippy --all-targets --all-features`
+
+### Decisions
+
+- Kept the two-frame default timeout for ordinary GBMicrotest ROMs, but now exits earlier when the documented sentinel is written.
+
+### Notes
+
+- Smoke report still shows the two selected GBMicrotest ROMs timing out, but now records all three documented HRAM bytes for debugging.
+
+## 0035: Fix DMG golden image selection
+
+Date: 2026-06-11
+
+Status: Complete
+
+### Goal
+
+Fix a false negative where DMG runs could compare `dmg-acid2.gb` against the CGB-labelled golden image.
+
+### Changes
+
+- Updated golden PNG ranking to prefer target labels in the filename suffix after the ROM stem.
+- Added a regression test proving `dmg-acid2-dmg.png` ranks ahead of `dmg-acid2-cgb.png` for DMG runs.
+
+### Tests
+
+- `cargo test -p gb-romtest golden_sort_prefers_dmg_label_for_dmg_target`
+- `cargo run -p gb-romtest -- run --profile smoke --format both`
+- `cargo fmt --check`
+- `cargo test`
+- `cargo clippy --all-targets --all-features`
+
+### Decisions
+
+- Treated `dmg`/`cgb` as variant labels after the ROM stem instead of substring matching the full filename.
+
+### Notes
+
+- Smoke report now shows `dmg-acid2` passing; remaining smoke issues are the two GBMicrotest timeouts.
+
+## 0034: Add agent-first test ROM runner
+
+Date: 2026-06-10
+
+Status: Complete
+
+### Goal
+
+Add a headless runner that agents can use to execute local external test ROM profiles and write structured reports.
+
+### Changes
+
+- Added `gb-romtest` workspace binary with `run` profiles, suite/ROM filters, DMG default target, and JSON/Markdown reports under `reports/test-roms/`.
+- Added suite classification for non-Gambatte ROMs, including breakpoint register checks, serial text checks, GBMicrotest HRAM signatures, screenshot comparisons, scripted input metadata, and audio unsupported reporting.
+- Added `/reports/` to ignored generated artifacts.
+
+### Tests
+
+- `cargo fmt`
+- `cargo fmt --check`
+- `cargo test`
+- `cargo test -p gb-romtest`
+- `cargo clippy --all-targets --all-features`
+- `cargo run -p gb-romtest -- run --profile smoke --format both`
+- Added runner unit tests for classification, result evaluators, screenshot diffing, and scripted joypad schedules.
+
+### Decisions
+
+- Kept all runner logic in `gb-romtest`; `gb-core` remains emulator-only and `gb-desktop` remains the visual/manual frontend.
+- Added `serde` and `serde_json` to `gb-romtest` for machine-readable reports.
+- Reused `image` with PNG support in `gb-romtest` for golden screenshot comparison.
+- Skipped Gambatte explicitly because its C++ harness is out of scope for this milestone.
+
+### Notes
+
+- Smoke run wrote 7 results: 4 passed, 1 screenshot failure, and 2 GBMicrotest timeouts.
+- Audio tests are inventoried but reported unsupported until deterministic APU output exists.
+- Screenshot comparison is exact pixel equality for now; tolerance can be added later if needed.
+
 ## 0033: Improve manual harness ROM navigation
 
 Date: 2026-06-10

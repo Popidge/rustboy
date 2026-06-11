@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/gb-core", "crates/gb-desktop"]
+members = ["crates/gb-core", "crates/gb-desktop", "crates/gb-romtest"]
 resolver = "2"
 
 [workspace.package]

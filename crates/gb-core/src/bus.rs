@@ -81,7 +81,7 @@ macro_rules! read8_body {
             CARTRIDGE_RAM_START..=CARTRIDGE_RAM_END => $self.cartridge.read_ram($address),
             WRAM_START..=WRAM_END => $self.wram[wram_index($address)],
             OAM_START..=OAM_END => {
-                if $self.dma_active {
+                if $self.dma_active || !$self.ppu.cpu_can_access_oam() {
                     0xFF
                 } else {
                     $self.ppu.read_oam($address - OAM_START)
@@ -151,7 +151,9 @@ impl Bus {
 
     /// Writes one byte into the CPU address space.
     ///
-    /// Each write advances bus-owned hardware by one M-cycle (4 T-cycles).
+    /// Each write advances bus-owned hardware by one M-cycle (4 T-cycles)
+    /// **before** the register write takes effect, matching real hardware
+    /// where the bus-cycle elapses ahead of the value being latched.
     ///
     /// Writes to ROM and unsupported regions are ignored for now.
     pub fn write8(&mut self, address: u16, value: u8) {
@@ -166,7 +168,7 @@ impl Bus {
             CARTRIDGE_RAM_START..=CARTRIDGE_RAM_END => self.cartridge.write_ram(address, value),
             WRAM_START..=WRAM_END => self.wram[wram_index(address)] = value,
             OAM_START..=OAM_END => {
-                if !self.dma_active {
+                if !self.dma_active && self.ppu.cpu_can_access_oam() {
                     self.ppu.write_oam(address - OAM_START, value);
                 }
             }

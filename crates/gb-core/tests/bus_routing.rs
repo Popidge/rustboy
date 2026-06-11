@@ -51,7 +51,7 @@ fn calculate_header_checksum(rom: &[u8]) -> u8 {
 
 #[test]
 fn read8_routes_cartridge_rom_reads() {
-    let bus = test_bus_with_rom_byte(0x0100, 0x42);
+    let mut bus = test_bus_with_rom_byte(0x0100, 0x42);
 
     assert_eq!(
         bus.read8(0x0100),
@@ -62,7 +62,7 @@ fn read8_routes_cartridge_rom_reads() {
 
 #[test]
 fn read8_returns_ff_for_unsupported_addresses() {
-    let bus = test_bus_with_rom_byte(0x0100, 0x42);
+    let mut bus = test_bus_with_rom_byte(0x0100, 0x42);
 
     assert_eq!(
         bus.read8(0xA000),
@@ -154,7 +154,10 @@ fn timer_registers_are_routed_and_tick_requests_timer_interrupt() {
     bus.write8(0xFF05, 0xFF);
     bus.write8(0xFF06, 0x77);
     bus.write8(0xFF07, 0x05);
-    bus.tick(TCycles(16));
+    // Each write8 advances hardware by 4 T-cycles *before* the register
+    // write, so the timer was still disabled during those advances.
+    // Tick enough extra cycles to cause a TIMA overflow.
+    bus.tick(TCycles(28));
 
     assert_eq!(
         bus.read8(0xFF05),
@@ -264,6 +267,11 @@ fn vram_reads_and_writes_route_through_ppu() {
 fn oam_reads_and_writes_route_through_ppu_and_unusable_oam_reads_ff() {
     let mut bus = test_bus_with_rom_byte(0x0100, 0x42);
 
+    // OAM is inaccessible during OAM-search (mode 2) and pixel-transfer
+    // (mode 3).  The fresh PPU starts in OAM-search, so tick past all
+    // of mode 2 (80 dots) and mode 3 (172 dots) into HBlank.
+    bus.tick(TCycles(260));
+
     bus.write8(0xFE00, 0x56);
     bus.write8(0xFE9F, 0x78);
     bus.write8(0xFEA0, 0x99);
@@ -299,7 +307,18 @@ fn writing_dma_register_copies_one_oam_page() {
         bus.write8(0xC000 + offset, byte);
     }
 
+    // DMA is now started by the write to FF46 and completed step-by-step.
     bus.write8(0xFF46, 0xC0);
+
+    // Advance DMA one byte at a time until it finishes.
+    while bus.dma_active() {
+        let cycles = bus.dma_step();
+        bus.tick(TCycles(cycles));
+    }
+
+    // After DMA the PPU may be in modes 2/3 where OAM reads return 0xFF.
+    // Tick well into VBlank (≥ 154 lines × 456 dots) so OAM is accessible.
+    bus.tick(TCycles(456 * 154));
 
     assert_eq!(bus.read8(0xFE00), 0x00, "DMA should copy OAM byte 0");
     assert_eq!(bus.read8(0xFE01), 0x01, "DMA should copy OAM byte 1");

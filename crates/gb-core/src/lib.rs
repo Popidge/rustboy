@@ -50,8 +50,13 @@ impl GameBoy {
     ///
     /// Returns a CPU error when execution reaches an unimplemented opcode.
     pub fn step(&mut self) -> Result<TCycles, CpuError> {
+        self.bus.begin_cpu_step();
         let cycles = self.cpu.step(&mut self.bus)?;
-        self.bus.tick(cycles);
+        let clocked_cycles = self.bus.clocked_cpu_cycles();
+
+        if clocked_cycles.0 < cycles.0 {
+            self.bus.tick(TCycles(cycles.0 - clocked_cycles.0));
+        }
 
         Ok(cycles)
     }
@@ -182,6 +187,23 @@ mod tests {
             cycles.map(|cycles| cycles.0),
             Ok(4),
             "NOP through GameBoy should return its T-cycle count"
+        );
+    }
+
+    #[test]
+    fn game_boy_does_not_double_tick_clocked_nop_fetches() {
+        let mut rom = minimal_rom();
+        rom[0x0100] = 0x00;
+        let mut game_boy = GameBoy::from_rom(rom).expect("test ROM should load");
+
+        for _ in 0..64 {
+            game_boy.step().expect("NOP should execute");
+        }
+
+        assert_eq!(
+            game_boy.debug_read8(0xFF04),
+            0x01,
+            "64 NOP opcode fetches should advance DIV by 256 T-cycles once"
         );
     }
 }

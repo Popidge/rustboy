@@ -1,5 +1,46 @@
 # Milestones
 
+## 0043: Introduce clocked CPU bus access
+
+Date: 2026-06-11
+
+Status: Complete
+
+### Goal
+
+Add CPU-facing bus-cycle helpers and convert the first timing-sensitive CPU paths without broad instruction rewrites.
+
+### Changes
+
+- Added `Bus::cpu_fetch8`, `Bus::cpu_read8`, `Bus::cpu_write8`, and `Bus::cpu_idle_mcycle`.
+- Clocked opcode fetches, including the HALT bug repeated fetch, through the bus.
+- Clocked HALT idle and interrupt-service idle cycles through the bus.
+- Kept `GameBoy::step` returning whole-instruction T-cycles while ticking only any unclocked remainder for instructions not yet converted.
+- Added regression coverage for CPU bus helpers advancing DIV and for NOP fetches avoiding double ticking.
+
+### Tests
+
+- `cargo fmt`
+- `cargo test`
+- `cargo clippy --all-targets --all-features`
+- `cargo run -p gb-romtest -- run --rom test-roms/blargg/cpu_instrs/cpu_instrs.gb --target dmg --format both --jobs 1 --case-timeout-seconds 60`
+- `cargo run -p gb-romtest -- run --rom test-roms/blargg/instr_timing/instr_timing.gb --target dmg --format both --jobs 1 --case-timeout-seconds 60`
+- `cargo run -p gb-romtest -- run --rom test-roms/blargg/halt_bug.gb --target dmg --format both --jobs 1 --case-timeout-seconds 60`
+- Added `cpu_bus_cycle_helpers_advance_hardware_one_machine_cycle`.
+- Added `game_boy_does_not_double_tick_clocked_nop_fetches`.
+
+### Decisions
+
+- Treated this as foundational timing work, not a compatibility patch.
+- Added bus-side clocked-cycle accounting so partially converted CPU execution can coexist with existing public `GameBoy::step` behaviour.
+- Left operand reads, data reads/writes, stack writes, and most internal instruction cycles on the existing cycle-total path for future scoped milestones.
+- Added no dependencies.
+
+### Notes
+
+- Blargg `cpu_instrs`, `instr_timing`, and `halt_bug` all pass with this slice.
+- Follow-up work should convert operand/data memory access and stack/internal cycles instruction family by instruction family.
+
 ## 0042: Document accuracy timing architecture
 
 Date: 2026-06-11

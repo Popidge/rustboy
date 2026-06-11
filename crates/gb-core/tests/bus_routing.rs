@@ -169,6 +169,23 @@ fn timer_registers_are_routed_and_tick_requests_timer_interrupt() {
 }
 
 #[test]
+fn cpu_bus_cycle_helpers_advance_hardware_one_machine_cycle() {
+    let mut bus = test_bus_with_rom_byte(0x0100, 0x42);
+
+    let value = bus.cpu_fetch8(0x0100);
+    for _ in 0..63 {
+        bus.cpu_idle_mcycle();
+    }
+
+    assert_eq!(value, 0x42, "CPU opcode fetch should return the bus byte");
+    assert_eq!(
+        bus.read8(0xFF04),
+        0x01,
+        "64 CPU machine cycles should advance DIV by 256 T-cycles"
+    );
+}
+
+#[test]
 fn serial_registers_are_routed_and_output_can_be_drained() {
     let mut bus = test_bus_with_rom_byte(0x0100, 0x42);
 

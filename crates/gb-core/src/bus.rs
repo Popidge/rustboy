@@ -56,6 +56,7 @@ pub struct Bus {
     hram: [u8; HRAM_SIZE],
     interrupt_enable: InterruptFlags,
     interrupt_flags: InterruptFlags,
+    clocked_cpu_cycles: TCycles,
 }
 
 impl Bus {
@@ -73,6 +74,7 @@ impl Bus {
             hram: [0; HRAM_SIZE],
             interrupt_enable: InterruptFlags::default(),
             interrupt_flags: InterruptFlags::default(),
+            clocked_cpu_cycles: TCycles(0),
         }
     }
 
@@ -146,6 +148,45 @@ impl Bus {
         self.timer.tick(cycles, &mut self.interrupt_flags);
         self.ppu.tick(cycles, &mut self.interrupt_flags);
         self.apu.tick(cycles);
+    }
+
+    /// Starts accounting for CPU bus cycles during one logical CPU step.
+    pub(crate) fn begin_cpu_step(&mut self) {
+        self.clocked_cpu_cycles = TCycles(0);
+    }
+
+    /// Returns how many T-cycles were already advanced by clocked CPU bus access.
+    #[must_use]
+    pub(crate) fn clocked_cpu_cycles(&self) -> TCycles {
+        self.clocked_cpu_cycles
+    }
+
+    /// Fetches an opcode byte for the CPU and advances one machine cycle.
+    pub fn cpu_fetch8(&mut self, address: u16) -> u8 {
+        let value = self.read8(address);
+        self.cpu_idle_mcycle();
+        value
+    }
+
+    /// Reads one byte for the CPU and advances one machine cycle.
+    pub fn cpu_read8(&mut self, address: u16) -> u8 {
+        let value = self.read8(address);
+        self.cpu_idle_mcycle();
+        value
+    }
+
+    /// Writes one byte for the CPU and advances one machine cycle.
+    pub fn cpu_write8(&mut self, address: u16, value: u8) {
+        self.write8(address, value);
+        self.cpu_idle_mcycle();
+    }
+
+    /// Advances one internal CPU machine cycle without a memory transfer.
+    pub fn cpu_idle_mcycle(&mut self) {
+        const CPU_MACHINE_CYCLE: TCycles = TCycles(4);
+
+        self.tick(CPU_MACHINE_CYCLE);
+        self.clocked_cpu_cycles.0 += CPU_MACHINE_CYCLE.0;
     }
 
     #[must_use]

@@ -138,6 +138,13 @@ impl Cpu {
         u16::from_le_bytes([low, high])
     }
 
+    fn fetch_opcode(&mut self, bus: &mut Bus) -> u8 {
+        let address = self.registers.pc;
+        let value = bus.cpu_fetch8(address);
+        self.registers.pc = self.registers.pc.wrapping_add(1);
+        value
+    }
+
     /// Executes one CPU instruction.
     ///
     /// # Errors
@@ -155,9 +162,9 @@ impl Cpu {
         let pc = self.registers.pc;
         let opcode = if self.halt_bug_pending {
             self.halt_bug_pending = false;
-            bus.read8(pc)
+            bus.cpu_fetch8(pc)
         } else {
-            self.fetch8(bus)
+            self.fetch_opcode(bus)
         };
 
         let result = match opcode {
@@ -470,6 +477,7 @@ impl Cpu {
         let pending = bus.pending_interrupt();
 
         if self.run_state == CpuRunState::Halted && pending.is_none() {
+            bus.cpu_idle_mcycle();
             return Some(TCycles(4));
         }
 
@@ -481,6 +489,9 @@ impl Cpu {
             if let Some(interrupt) = pending {
                 self.ime = false;
                 self.ime_enable_pending = false;
+                for _ in 0..5 {
+                    bus.cpu_idle_mcycle();
+                }
                 bus.clear_interrupt(interrupt);
                 self.push16(bus, self.registers.pc);
                 self.registers.pc = interrupt.vector();

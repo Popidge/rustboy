@@ -46,10 +46,20 @@ impl GameBoy {
 
     /// Executes one CPU instruction and advances bus-owned hardware.
     ///
+    /// If an OAM DMA transfer is in progress the CPU is paused — each
+    /// call advances one DMA byte (4 T-cycles) instead of executing an
+    /// instruction.
+    ///
     /// # Errors
     ///
     /// Returns a CPU error when execution reaches an unimplemented opcode.
     pub fn step(&mut self) -> Result<TCycles, CpuError> {
+        if self.bus.dma_active() {
+            let cycles = self.bus.dma_step();
+            self.bus.tick(TCycles(cycles));
+            return Ok(TCycles(cycles));
+        }
+
         let cycles = self.cpu.step(&mut self.bus)?;
         self.bus.tick(cycles);
 

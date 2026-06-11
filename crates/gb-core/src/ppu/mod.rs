@@ -104,13 +104,28 @@ impl Ppu {
 
     #[must_use]
     pub fn read_oam(&self, offset: u16) -> u8 {
+        if !self.oam_accessible() {
+            return 0xFF;
+        }
         self.oam.get(usize::from(offset)).copied().unwrap_or(0xFF)
     }
 
     pub fn write_oam(&mut self, offset: u16, value: u8) {
+        if !self.oam_accessible() {
+            return;
+        }
         if let Some(byte) = self.oam.get_mut(usize::from(offset)) {
             *byte = value;
         }
+    }
+
+    /// Returns `true` when the CPU may safely read or write OAM.
+    ///
+    /// OAM is inaccessible during OAM-search (mode 2) and pixel-transfer
+    /// (mode 3).  Reads return `0xFF` and writes are silently dropped.
+    #[must_use]
+    pub fn oam_accessible(&self) -> bool {
+        matches!(self.mode, PpuMode::HBlank | PpuMode::VBlank)
     }
 
     #[must_use]

@@ -60,6 +60,14 @@ pub struct Bus {
     /// current instruction.  Subtracted from [`tick`](Self::tick) to avoid
     /// double-counting when the CPU contributes its own cycle total.
     pending_tick: u32,
+    /// `true` while an OAM DMA transfer is in progress.  During DMA the
+    /// CPU cannot access OAM ($FE00–$FE9F) — reads return `0xFF` and
+    /// writes are silently dropped.
+    dma_active: bool,
+    /// Source address for an in-progress OAM DMA transfer.
+    dma_source: u16,
+    /// Current byte offset into the 160-byte OAM DMA transfer.
+    dma_offset: u16,
 }
 
 /// Extracts the inner result of a `read8` match — identical dispatch used
@@ -72,7 +80,13 @@ macro_rules! read8_body {
             VRAM_START..=VRAM_END => $self.ppu.read_vram($address - VRAM_START),
             CARTRIDGE_RAM_START..=CARTRIDGE_RAM_END => $self.cartridge.read_ram($address),
             WRAM_START..=WRAM_END => $self.wram[wram_index($address)],
-            OAM_START..=OAM_END => $self.ppu.read_oam($address - OAM_START),
+            OAM_START..=OAM_END => {
+                if $self.dma_active {
+                    0xFF
+                } else {
+                    $self.ppu.read_oam($address - OAM_START)
+                }
+            }
             UNUSABLE_OAM_START..=UNUSABLE_OAM_END => 0xFF,
             JOYPAD_ADDR => $self.joypad.read(),
             SERIAL_START..=SERIAL_END => $self.serial.read($address),
@@ -103,6 +117,9 @@ impl Bus {
             interrupt_enable: InterruptFlags::default(),
             interrupt_flags: InterruptFlags::default(),
             pending_tick: 0,
+            dma_active: false,
+            dma_source: 0,
+            dma_offset: 0,
         }
     }
 
@@ -148,14 +165,18 @@ impl Bus {
             VRAM_START..=VRAM_END => self.ppu.write_vram(address - VRAM_START, value),
             CARTRIDGE_RAM_START..=CARTRIDGE_RAM_END => self.cartridge.write_ram(address, value),
             WRAM_START..=WRAM_END => self.wram[wram_index(address)] = value,
-            OAM_START..=OAM_END => self.ppu.write_oam(address - OAM_START, value),
+            OAM_START..=OAM_END => {
+                if !self.dma_active {
+                    self.ppu.write_oam(address - OAM_START, value);
+                }
+            }
             UNUSABLE_OAM_START..=UNUSABLE_OAM_END => {}
             JOYPAD_ADDR => self.joypad.write(value),
-            SERIAL_START..=SERIAL_END => self.serial.write(address, value),
+            SERIAL_START..=SERIAL_END => self.serial.write(address, value, &mut self.interrupt_flags),
             TIMER_START..=TIMER_END => self.timer.write(address, value),
             INTERRUPT_FLAGS_ADDR => self.interrupt_flags.write_if(value),
             0xFF10..=0xFF3F => self.apu.write(address, value),
-            DMA_ADDR => self.run_oam_dma(value),
+            DMA_ADDR => self.start_oam_dma(value),
             PPU_REGISTER_START..=PPU_REGISTER_END => self.ppu.write_register(address, value),
             HRAM_START..=HRAM_END => self.hram[hram_index(address)] = value,
             INTERRUPT_ENABLE_ADDR => self.interrupt_enable.set_raw(value),
@@ -279,13 +300,38 @@ impl Bus {
         InterruptFlags::first_pending(self.interrupt_enable, self.interrupt_flags)
     }
 
-    fn run_oam_dma(&mut self, value: u8) {
-        let source_start = u16::from(value) << 8;
+    fn start_oam_dma(&mut self, value: u8) {
+        self.dma_active = true;
+        self.dma_source = u16::from(value) << 8;
+        self.dma_offset = 0;
+    }
 
-        for offset in 0..OAM_SIZE {
-            let byte = self.read8(source_start.wrapping_add(offset));
-            self.ppu.write_oam(offset, byte);
+    /// Transfers the next byte of an in-progress OAM DMA, advancing
+    /// hardware by 1 M-cycle (4 T-cycles).  Returns the number of T-cycles
+    /// consumed (always 4, or 0 when DMA is complete).
+    ///
+    /// Callers should call [`tick`](Self::tick) with the returned value
+    /// after each byte transfer.
+    pub fn dma_step(&mut self) -> u32 {
+        if !self.dma_active || self.dma_offset >= OAM_SIZE {
+            self.dma_active = false;
+            return 0;
         }
+        let source_addr = self.dma_source.wrapping_add(self.dma_offset);
+        // Use no-advance so the hardware tick is controlled by the caller.
+        let byte = self.read8_no_advance(source_addr);
+        self.ppu.write_oam(self.dma_offset, byte);
+        self.dma_offset += 1;
+        if self.dma_offset >= OAM_SIZE {
+            self.dma_active = false;
+        }
+        4
+    }
+
+    /// Returns `true` when an OAM DMA transfer is in progress.
+    #[must_use]
+    pub fn dma_active(&self) -> bool {
+        self.dma_active
     }
 }
 

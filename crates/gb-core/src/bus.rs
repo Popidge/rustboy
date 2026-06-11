@@ -56,6 +56,35 @@ pub struct Bus {
     hram: [u8; HRAM_SIZE],
     interrupt_enable: InterruptFlags,
     interrupt_flags: InterruptFlags,
+    /// T-cycles already advanced by per-access reads/writes during the
+    /// current instruction.  Subtracted from [`tick`](Self::tick) to avoid
+    /// double-counting when the CPU contributes its own cycle total.
+    pending_tick: u32,
+}
+
+/// Extracts the inner result of a `read8` match — identical dispatch used
+/// by both [`read8`](Bus::read8) (ticking) and
+/// [`read8_no_advance`](Bus::read8_no_advance) (debug inspection).
+macro_rules! read8_body {
+    ($self:expr, $address:expr) => {
+        match $address {
+            0x0000..=0x7FFF => $self.cartridge.read_rom($address).unwrap_or(0xFF),
+            VRAM_START..=VRAM_END => $self.ppu.read_vram($address - VRAM_START),
+            CARTRIDGE_RAM_START..=CARTRIDGE_RAM_END => $self.cartridge.read_ram($address),
+            WRAM_START..=WRAM_END => $self.wram[wram_index($address)],
+            OAM_START..=OAM_END => $self.ppu.read_oam($address - OAM_START),
+            UNUSABLE_OAM_START..=UNUSABLE_OAM_END => 0xFF,
+            JOYPAD_ADDR => $self.joypad.read(),
+            SERIAL_START..=SERIAL_END => $self.serial.read($address),
+            TIMER_START..=TIMER_END => $self.timer.read($address),
+            INTERRUPT_FLAGS_ADDR => $self.interrupt_flags.read_if(),
+            0xFF10..=0xFF3F => $self.apu.read($address),
+            PPU_REGISTER_START..=PPU_REGISTER_END => $self.ppu.read_register($address),
+            HRAM_START..=HRAM_END => $self.hram[hram_index($address)],
+            INTERRUPT_ENABLE_ADDR => $self.interrupt_enable.raw(),
+            _ => 0xFF,
+        }
+    };
 }
 
 impl Bus {
@@ -73,37 +102,47 @@ impl Bus {
             hram: [0; HRAM_SIZE],
             interrupt_enable: InterruptFlags::default(),
             interrupt_flags: InterruptFlags::default(),
+            pending_tick: 0,
         }
     }
 
     /// Reads one byte from the CPU address space.
     ///
+    /// Each read advances bus-owned hardware by one M-cycle (4 T-cycles) so
+    /// that the timer and other components stay in sync during multi-access
+    /// instructions.  The cycle accounting is reconciled in [`tick`].
+    ///
     /// Unsupported regions return `0xFF` until their hardware components exist.
     #[must_use]
-    pub fn read8(&self, address: u16) -> u8 {
-        match address {
-            0x0000..=0x7FFF => self.cartridge.read_rom(address).unwrap_or(0xFF),
-            VRAM_START..=VRAM_END => self.ppu.read_vram(address - VRAM_START),
-            CARTRIDGE_RAM_START..=CARTRIDGE_RAM_END => self.cartridge.read_ram(address),
-            WRAM_START..=WRAM_END => self.wram[wram_index(address)],
-            OAM_START..=OAM_END => self.ppu.read_oam(address - OAM_START),
-            UNUSABLE_OAM_START..=UNUSABLE_OAM_END => 0xFF,
-            JOYPAD_ADDR => self.joypad.read(),
-            SERIAL_START..=SERIAL_END => self.serial.read(address),
-            TIMER_START..=TIMER_END => self.timer.read(address),
-            INTERRUPT_FLAGS_ADDR => self.interrupt_flags.read_if(),
-            0xFF10..=0xFF3F => self.apu.read(address),
-            PPU_REGISTER_START..=PPU_REGISTER_END => self.ppu.read_register(address),
-            HRAM_START..=HRAM_END => self.hram[hram_index(address)],
-            INTERRUPT_ENABLE_ADDR => self.interrupt_enable.raw(),
-            _ => 0xFF,
-        }
+    pub fn read8(&mut self, address: u16) -> u8 {
+        self.pending_tick += 4;
+        self.timer.tick(TCycles(4), &mut self.interrupt_flags);
+        self.ppu.tick(TCycles(4), &mut self.interrupt_flags);
+        self.apu.tick(TCycles(4));
+
+        read8_body!(self, address)
+    }
+
+    /// Reads one byte without advancing any bus-owned hardware.
+    ///
+    /// Intended for debug inspection and test tooling that must remain
+    /// read-only.
+    #[must_use]
+    pub fn read8_no_advance(&self, address: u16) -> u8 {
+        read8_body!(self, address)
     }
 
     /// Writes one byte into the CPU address space.
     ///
+    /// Each write advances bus-owned hardware by one M-cycle (4 T-cycles).
+    ///
     /// Writes to ROM and unsupported regions are ignored for now.
     pub fn write8(&mut self, address: u16, value: u8) {
+        self.pending_tick += 4;
+        self.timer.tick(TCycles(4), &mut self.interrupt_flags);
+        self.ppu.tick(TCycles(4), &mut self.interrupt_flags);
+        self.apu.tick(TCycles(4));
+
         match address {
             0x0000..=0x7FFF => self.cartridge.write_rom(address, value),
             VRAM_START..=VRAM_END => self.ppu.write_vram(address - VRAM_START, value),
@@ -126,7 +165,7 @@ impl Bus {
 
     /// Reads a little-endian 16-bit value from the CPU address space.
     #[must_use]
-    pub fn read16(&self, address: u16) -> u16 {
+    pub fn read16(&mut self, address: u16) -> u16 {
         let low = self.read8(address);
         let high = self.read8(address.wrapping_add(1));
 
@@ -142,10 +181,19 @@ impl Bus {
     }
 
     /// Advances bus-owned hardware components by the given T-cycles.
+    ///
+    /// Subtracts cycles that were already consumed by individual `read8` /
+    /// `write8` calls during the current instruction so that the total
+    /// hardware time matches the CPU-reported instruction length.
     pub fn tick(&mut self, cycles: TCycles) {
-        self.timer.tick(cycles, &mut self.interrupt_flags);
-        self.ppu.tick(cycles, &mut self.interrupt_flags);
-        self.apu.tick(cycles);
+        let per_access = std::mem::take(&mut self.pending_tick);
+        let remaining = cycles.0.saturating_sub(per_access);
+
+        if remaining > 0 {
+            self.timer.tick(TCycles(remaining), &mut self.interrupt_flags);
+            self.ppu.tick(TCycles(remaining), &mut self.interrupt_flags);
+            self.apu.tick(TCycles(remaining));
+        }
     }
 
     #[must_use]

@@ -562,6 +562,10 @@ fn classify_case(root: &Path, path: PathBuf) -> Option<RomCase> {
         ResultRule::Audio
     } else if suite == "gbmicrotest" {
         ResultRule::RamSignature
+    } else if suite == "blargg" && normalized.contains("dmg_sound") {
+        // dmg_sound ROMs display pass/fail on screen and loop
+        // infinitely; use screenshot comparison against the golden PNG.
+        ResultRule::Screenshot
     } else if suite == "blargg" {
         ResultRule::SerialText
     } else if normalized == "mealybug-tearoom-tests/mbc/mbc3_rtc.gb" {
@@ -696,6 +700,12 @@ fn is_rom_path(path: &Path) -> bool {
 }
 
 fn is_audio_case(normalized: &str) -> bool {
+    // Blargg audio ROMs report pass/fail via serial output (like other
+    // blargg tests), not via APU sample comparison. Treat them as
+    // regular non-audio cases so they run under the SerialText rule.
+    if normalized.contains("blargg/") && normalized.contains("dmg_sound") {
+        return false;
+    }
     normalized.contains("/dmg_sound/")
         || normalized.contains("/cgb_sound/")
         || normalized.contains("/same-suite/apu/")

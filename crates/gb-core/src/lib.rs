@@ -88,7 +88,7 @@ impl GameBoy {
     /// owns all normal memory access.
     #[must_use]
     pub fn debug_read8(&self, address: u16) -> u8 {
-        self.bus.read8(address)
+        self.bus.read8_no_advance(address)
     }
 
     /// Returns collected serial debug output without draining it.

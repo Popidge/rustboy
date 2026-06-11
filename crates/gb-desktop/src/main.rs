@@ -1,5 +1,7 @@
+use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use font8x8::UnicodeFonts;
 use gb_core::{
+    apu::{StereoSample, AUDIO_SAMPLE_RATE},
     bus::Bus,
     cartridge::Cartridge,
     cpu::Cpu,
@@ -10,10 +12,12 @@ use gb_core::{
 use pixels::{Pixels, SurfaceTexture};
 use std::{
     cmp::Ordering,
+    collections::VecDeque,
     env,
     error::Error,
     fs,
     path::{Path, PathBuf},
+    sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
 use winit::{
@@ -399,6 +403,17 @@ impl DisplaySource {
     fn set_button(&mut self, button: Button, pressed: bool) {
         if let Self::Emulator(game_boy, _) = self {
             game_boy.set_button(button, pressed);
+        }
+    }
+
+    fn take_audio_samples(&mut self) -> Vec<StereoSample> {
+        match self {
+            Self::Emulator(game_boy, _) => game_boy.take_audio_samples(),
+            Self::Harness(harness) => harness
+                .running
+                .as_mut()
+                .map_or_else(Vec::new, |running| running.game_boy.take_audio_samples()),
+            Self::Demo(_) => Vec::new(),
         }
     }
 
@@ -1441,11 +1456,122 @@ fn draw_char(target: &mut [u32], left: usize, top: usize, character: char, color
     }
 }
 
+struct AudioSink {
+    queue: Arc<Mutex<VecDeque<StereoSample>>>,
+    _stream: cpal::Stream,
+}
+
+impl AudioSink {
+    fn new() -> Result<Self, Box<dyn Error>> {
+        let host = cpal::default_host();
+        let device = host
+            .default_output_device()
+            .ok_or("no default audio output device")?;
+        let supported_config = preferred_audio_config(&device)?;
+        let sample_format = supported_config.sample_format();
+        let config = supported_config.config();
+        let queue = Arc::new(Mutex::new(VecDeque::new()));
+        let stream = match sample_format {
+            cpal::SampleFormat::F32 => build_audio_stream::<f32>(&device, &config, queue.clone())?,
+            cpal::SampleFormat::I16 => build_audio_stream::<i16>(&device, &config, queue.clone())?,
+            cpal::SampleFormat::U16 => build_audio_stream::<u16>(&device, &config, queue.clone())?,
+            format => return Err(format!("unsupported audio sample format: {format:?}").into()),
+        };
+
+        stream.play()?;
+
+        Ok(Self {
+            queue,
+            _stream: stream,
+        })
+    }
+
+    fn push_samples(&self, samples: Vec<StereoSample>) {
+        if samples.is_empty() {
+            return;
+        }
+
+        let Ok(mut queue) = self.queue.lock() else {
+            return;
+        };
+        queue.extend(samples);
+        let max_buffered_samples =
+            usize::try_from(AUDIO_SAMPLE_RATE / 2).expect("sample rate fits in usize");
+        while queue.len() > max_buffered_samples {
+            queue.pop_front();
+        }
+    }
+}
+
+fn preferred_audio_config(
+    device: &cpal::Device,
+) -> Result<cpal::SupportedStreamConfig, Box<dyn Error>> {
+    let supported_configs = device.supported_output_configs()?;
+
+    for config in supported_configs {
+        if config.channels() < 2 {
+            continue;
+        }
+        if config.min_sample_rate().0 <= AUDIO_SAMPLE_RATE
+            && config.max_sample_rate().0 >= AUDIO_SAMPLE_RATE
+        {
+            return Ok(config.with_sample_rate(cpal::SampleRate(AUDIO_SAMPLE_RATE)));
+        }
+    }
+
+    Ok(device.default_output_config()?)
+}
+
+fn build_audio_stream<T>(
+    device: &cpal::Device,
+    config: &cpal::StreamConfig,
+    queue: Arc<Mutex<VecDeque<StereoSample>>>,
+) -> Result<cpal::Stream, cpal::BuildStreamError>
+where
+    T: cpal::Sample + cpal::SizedSample + cpal::FromSample<f32>,
+{
+    let channels = usize::from(config.channels);
+    device.build_output_stream(
+        config,
+        move |data: &mut [T], _| fill_audio_output(data, channels, &queue),
+        |error| eprintln!("audio stream error: {error}"),
+        None,
+    )
+}
+
+fn fill_audio_output<T>(data: &mut [T], channels: usize, queue: &Arc<Mutex<VecDeque<StereoSample>>>)
+where
+    T: cpal::Sample + cpal::FromSample<f32>,
+{
+    let mut guard = queue.lock().ok();
+
+    for frame in data.chunks_mut(channels) {
+        let sample = guard.as_mut().and_then(|queue| queue.pop_front());
+        let (left, right) = sample.map_or((0.0, 0.0), |sample| {
+            (
+                f32::from(sample.left) / f32::from(i16::MAX),
+                f32::from(sample.right) / f32::from(i16::MAX),
+            )
+        });
+
+        if let Some(channel) = frame.get_mut(0) {
+            *channel = T::from_sample(left);
+        }
+        if let Some(channel) = frame.get_mut(1) {
+            *channel = T::from_sample(right);
+        }
+        for channel in frame.iter_mut().skip(2) {
+            *channel = T::from_sample(0.0);
+        }
+    }
+}
+
 struct DesktopApp {
     source: DisplaySource,
     window: Option<&'static Window>,
     pixels: Option<Pixels<'static>>,
     frame_pacer: FramePacer,
+    audio: Option<AudioSink>,
 }
 
 impl DesktopApp {
@@ -1455,6 +1581,7 @@ impl DesktopApp {
             window: None,
             pixels: None,
             frame_pacer: FramePacer::new(),
+            audio: None,
         }
     }
 
@@ -1478,6 +1605,9 @@ impl DesktopApp {
 
         self.pixels = Some(pixels);
         self.window = Some(window);
+        self.audio = AudioSink::new()
+            .map_err(|error| eprintln!("audio disabled: {error}"))
+            .ok();
     }
 
     fn redraw(&mut self, event_loop: &ActiveEventLoop) {
@@ -1495,6 +1625,10 @@ impl DesktopApp {
         };
 
         copy_framebuffer(framebuffer, pixels.frame_mut());
+        let audio_samples = self.source.take_audio_samples();
+        if let Some(audio) = self.audio.as_ref() {
+            audio.push_samples(audio_samples);
+        }
 
         if let Err(error) = pixels.render() {
             eprintln!("{error}");

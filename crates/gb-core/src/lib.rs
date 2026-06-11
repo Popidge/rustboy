@@ -1,5 +1,6 @@
 #![doc = "Core Game Boy emulation primitives."]
 
+pub mod apu;
 pub mod bus;
 pub mod cartridge;
 pub mod cpu;
@@ -9,6 +10,7 @@ pub mod ppu;
 pub mod serial;
 pub mod timer;
 
+use apu::StereoSample;
 use bus::Bus;
 use cartridge::{Cartridge, CartridgeError, SaveRamError};
 use cpu::{Cpu, CpuError, CpuRegisters, TCycles};
@@ -98,6 +100,17 @@ impl GameBoy {
     /// Drains collected serial debug output.
     pub fn take_serial_output(&mut self) -> Vec<u8> {
         self.bus.take_serial_output()
+    }
+
+    /// Returns generated audio samples without draining them.
+    #[must_use]
+    pub fn audio_samples(&self) -> &[StereoSample] {
+        self.bus.audio_samples()
+    }
+
+    /// Drains generated audio samples for frontend playback.
+    pub fn take_audio_samples(&mut self) -> Vec<StereoSample> {
+        self.bus.take_audio_samples()
     }
 
     /// Updates one joypad button state.

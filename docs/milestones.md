@@ -1,5 +1,43 @@
 # Milestones
 
+## 0040: Add APU and desktop sound output
+
+Date: 2026-06-11
+
+Status: Complete
+
+### Goal
+
+Implement the roadmap APU/sound milestone so the emulator core can generate DMG audio samples and the desktop frontend can play them.
+
+### Changes
+
+- Added an `Apu` component with audio register routing, NR52 power control, frame sequencer timing, two square channels, wave channel, noise channel, stereo mixing, and drainable PCM samples.
+- Routed `0xFF10..=0xFF3F` through `Bus`, ticked APU hardware with CPU cycles, and exposed audio samples through `Bus` and `GameBoy`.
+- Added a `cpal`-backed desktop audio sink that queues core-generated stereo samples and drains them from the host audio callback.
+- Added APU unit tests and bus routing coverage for generated audio sample draining.
+
+### Tests
+
+- `cargo fmt`
+- `cargo test -p gb-core apu`
+- `cargo test -p gb-desktop`
+- `cargo test`
+- `cargo clippy --all-targets --all-features`
+- Added tests in `crates/gb-core/src/apu.rs` and `crates/gb-core/tests/bus_routing.rs`.
+
+### Decisions
+
+- Kept audio synthesis in `gb-core` and host playback in `gb-desktop`.
+- Added `cpal` to `gb-desktop` only because audio backend dependencies belong at the frontend boundary.
+- Used signed 16-bit stereo PCM samples at 44.1 kHz as a simple frontend-facing core audio format.
+- Implemented practical first-pass APU behaviour; obscure register edge cases and audio test-ROM accuracy remain follow-up compatibility work.
+
+### Notes
+
+- Pan Docs audio register/timing references informed the implementation.
+- The desktop backend falls back to disabling audio if no host output device is available.
+
 ## 0039: Resolve remaining unsupported ROM registry gaps
 
 Date: 2026-06-11

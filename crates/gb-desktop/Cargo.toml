@@ -6,6 +6,7 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
+cpal = "0.15"
 font8x8 = "0.3"
 gb-core = { path = "../gb-core" }
 image = { version = "0.25", default-features = false, features = ["png"] }

@@ -195,6 +195,34 @@ fn serial_registers_are_routed_and_output_can_be_drained() {
 }
 
 #[test]
+fn audio_registers_are_routed_and_samples_can_be_drained() {
+    let mut bus = test_bus_with_rom_byte(0x0100, 0x42);
+
+    bus.write8(0xFF11, 0x80);
+    bus.write8(0xFF12, 0xF0);
+    bus.write8(0xFF14, 0x80);
+    bus.tick(TCycles(4_194_304 / 60));
+
+    assert_eq!(
+        bus.read8(0xFF12),
+        0xF0,
+        "APU envelope register should route through the bus"
+    );
+    assert!(
+        !bus.audio_samples().is_empty(),
+        "Bus ticking should advance APU sample generation"
+    );
+    assert!(
+        !bus.take_audio_samples().is_empty(),
+        "Bus should expose generated audio to frontends"
+    );
+    assert!(
+        bus.audio_samples().is_empty(),
+        "taking audio samples should drain the bus-owned APU buffer"
+    );
+}
+
+#[test]
 fn joypad_register_routes_selected_active_low_buttons_and_interrupts() {
     let mut bus = test_bus_with_rom_byte(0x0100, 0x42);
 

@@ -5,6 +5,7 @@
 //! milestones will add PPU, timer, serial, joypad, and APU routing.
 
 use crate::{
+    apu::{Apu, StereoSample},
     cartridge::Cartridge,
     cpu::TCycles,
     interrupt::{Interrupt, InterruptFlags},
@@ -50,6 +51,7 @@ pub struct Bus {
     joypad: Joypad,
     serial: Serial,
     timer: Timer,
+    apu: Apu,
     wram: [u8; WRAM_SIZE],
     hram: [u8; HRAM_SIZE],
     interrupt_enable: InterruptFlags,
@@ -66,6 +68,7 @@ impl Bus {
             joypad: Joypad::new(),
             serial: Serial::new(),
             timer: Timer::new(),
+            apu: Apu::new(),
             wram: [0; WRAM_SIZE],
             hram: [0; HRAM_SIZE],
             interrupt_enable: InterruptFlags::default(),
@@ -89,6 +92,7 @@ impl Bus {
             SERIAL_START..=SERIAL_END => self.serial.read(address),
             TIMER_START..=TIMER_END => self.timer.read(address),
             INTERRUPT_FLAGS_ADDR => self.interrupt_flags.read_if(),
+            0xFF10..=0xFF3F => self.apu.read(address),
             PPU_REGISTER_START..=PPU_REGISTER_END => self.ppu.read_register(address),
             HRAM_START..=HRAM_END => self.hram[hram_index(address)],
             INTERRUPT_ENABLE_ADDR => self.interrupt_enable.raw(),
@@ -111,6 +115,7 @@ impl Bus {
             SERIAL_START..=SERIAL_END => self.serial.write(address, value),
             TIMER_START..=TIMER_END => self.timer.write(address, value),
             INTERRUPT_FLAGS_ADDR => self.interrupt_flags.write_if(value),
+            0xFF10..=0xFF3F => self.apu.write(address, value),
             DMA_ADDR => self.run_oam_dma(value),
             PPU_REGISTER_START..=PPU_REGISTER_END => self.ppu.write_register(address, value),
             HRAM_START..=HRAM_END => self.hram[hram_index(address)] = value,
@@ -140,6 +145,7 @@ impl Bus {
     pub fn tick(&mut self, cycles: TCycles) {
         self.timer.tick(cycles, &mut self.interrupt_flags);
         self.ppu.tick(cycles, &mut self.interrupt_flags);
+        self.apu.tick(cycles);
     }
 
     #[must_use]
@@ -165,6 +171,15 @@ impl Bus {
     /// Drains collected serial debug output.
     pub fn take_serial_output(&mut self) -> Vec<u8> {
         self.serial.take_output()
+    }
+
+    #[must_use]
+    pub fn audio_samples(&self) -> &[StereoSample] {
+        self.apu.samples()
+    }
+
+    pub fn take_audio_samples(&mut self) -> Vec<StereoSample> {
+        self.apu.take_samples()
     }
 
     /// Updates one joypad button state and requests an interrupt on new presses.

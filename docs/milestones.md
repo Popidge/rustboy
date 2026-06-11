@@ -1,5 +1,43 @@
 # Milestones
 
+## 0045: Rebuild timer on DIV falling-edge model
+
+Date: 2026-06-11
+
+Status: Partial
+
+### Goal
+
+Replace the countdown-style timer with a 16-bit internal DIV model where TIMA increments on selected-bit falling edges, including DIV/TAC write effects and delayed overflow reload behaviour.
+
+### Changes
+
+- Rebuilt `Timer` around a 16-bit internal divider, with `DIV` reads exposing the upper byte.
+- Added selected DIV-bit falling-edge TIMA increments for all TAC frequencies.
+- Modelled DIV and TAC writes as possible timer-signal falling edges.
+- Added delayed TIMA overflow reload and Timer interrupt request timing.
+- Added TIMA/TMA reload-window unit coverage and updated the bus timer routing test for delayed reload visibility.
+
+### Tests
+
+- `cargo fmt`
+- `cargo test -p gb-core timer`
+- `cargo test`
+- `cargo clippy --all-targets --all-features`
+- Mooneye `acceptance/timer` ROMs from `test-roms/mooneye-test-suite`: 11 passed, 2 failed.
+- Remaining Mooneye failures: `tima_write_reloading.gb`, `tma_write_reloading.gb`.
+
+### Decisions
+
+- Treated this as foundational timer hardware modelling, not a ROM-specific compatibility patch.
+- Kept timer state owned by `Bus` and avoided broader CPU/bus write-order changes after a trial showed worse Mooneye timer coverage.
+- Added no dependencies.
+
+### Notes
+
+- `tima_write_reloading.gb` and `tma_write_reloading.gb` still need a more exact CPU write/reload-cycle ordering model.
+- A directory path passed directly to `gb-romtest --rom` currently discovers zero cases; the timer gate was run by iterating repo-relative ROM paths under `--rom-root test-roms`.
+
 ## 0044b: Model SM83 fetch/execute overlap
 
 Date: 2026-06-11

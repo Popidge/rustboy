@@ -158,6 +158,19 @@ fn timer_registers_are_routed_and_tick_requests_timer_interrupt() {
 
     assert_eq!(
         bus.read8(0xFF05),
+        0x00,
+        "TIMA should remain 0 during the overflow reload delay"
+    );
+    assert_eq!(
+        bus.interrupt_flags(),
+        0x00,
+        "TIMA overflow should not request Timer interrupt before reload"
+    );
+
+    bus.tick(TCycles(4));
+
+    assert_eq!(
+        bus.read8(0xFF05),
         0x77,
         "TIMA overflow should reload TMA through bus ticking"
     );

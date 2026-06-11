@@ -1,5 +1,48 @@
 # Milestones
 
+## 0046: Add stateful OAM DMA
+
+Date: 2026-06-11
+
+Status: Partial
+
+### Goal
+
+Replace immediate OAM DMA copies with bus-timed DMA state and add CPU-visible access restrictions during active DMA.
+
+### Changes
+
+- Added a bus-owned OAM DMA state machine with startup delay, one-byte-per-machine-cycle transfers, active restart support, and readable `FF46` source state.
+- Routed CPU fetch/read/write helpers through DMA-aware access checks so CPU OAM reads return `0xFF` and CPU OAM writes are ignored during active DMA.
+- Added DMA source handling for the pre-CGB echo extension where `E000..=FFFF` source addresses mirror `C000..=DFFF`.
+- Added ordinary echo RAM routing for `E000..=FDFF`.
+
+### Tests
+
+- `cargo fmt`
+- `cargo fmt --check`
+- `cargo test -p gb-core dma`
+- `cargo test`
+- `cargo clippy --all-targets --all-features`
+- Blargg gates passed: `mem_timing/mem_timing.gb`, `mem_timing-2/mem_timing.gb`.
+- Mooneye gates passed: `acceptance/oam_dma/basic.gb`, `reg_read.gb`, `sources-GS.gb`.
+- Wilbertpol Mooneye gates passed: `oam_dma_timing.gb`, `oam_dma_restart.gb`.
+- Wilbertpol Mooneye remaining failure: `oam_dma_start.gb`.
+- GBMicrotest DMA gates passed: `dma_0x1000.gb`, `dma_0x9000.gb`, `dma_0xA000.gb`, `dma_0xC000.gb`, `dma_0xE000.gb`.
+- GBMicrotest remaining issues: `dma_timing_a.gb` fails with `0xFF80=0x80`, `0xFF81=0x81`, `0xFF82=0xFF`; `dma_basic.gb` and `400-dma.gb` time out in the RAM-signature runner.
+
+### Decisions
+
+- Kept DMA owned and clocked by `Bus`, with CPU execution still routed through bus helpers.
+- Treated this as foundational hardware modelling; no ROM-specific compatibility patch was added for remaining GBMicrotest timing failures.
+- Modelled the first CPU-facing access restriction as OAM-area blocking during active DMA, leaving finer bus-conflict behaviour for follow-up work.
+- Added no dependencies.
+
+### Notes
+
+- Remaining DMA timing work likely needs more exact CPU/DMA bus conflict modelling and the precise `oam_dma_start` edge.
+- The `gb-romtest` CLI accepts only one `--rom` path per run; the listed gates were run individually.
+
 ## 0045: Rebuild timer on DIV falling-edge model
 
 Date: 2026-06-11

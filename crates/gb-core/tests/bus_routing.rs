@@ -321,19 +321,136 @@ fn oam_reads_and_writes_route_through_ppu_and_unusable_oam_reads_ff() {
 }
 
 #[test]
-fn writing_dma_register_copies_one_oam_page() {
+fn writing_dma_register_starts_stateful_oam_transfer() {
     let mut bus = test_bus_with_rom_byte(0x0100, 0x42);
 
     for offset in 0..0x00A0 {
-        let byte = u8::try_from(offset).expect("OAM DMA test offsets fit in u8");
+        let byte = u8::try_from(offset + 1).expect("OAM DMA test offsets fit in u8");
         bus.write8(0xC000 + offset, byte);
     }
 
+    bus.cpu_write8(0xFF46, 0xC0);
+
+    assert_eq!(
+        bus.read8(0xFE00),
+        0x00,
+        "DMA should not copy OAM byte 0 immediately after the register write cycle"
+    );
+
+    bus.tick(TCycles(4));
+
+    assert_eq!(
+        bus.read8(0xFE01),
+        0x00,
+        "first post-write DMA machine cycle should be startup delay, not byte 1"
+    );
+
+    bus.tick(TCycles(4));
+
+    assert_eq!(bus.read8(0xFE00), 0x01, "DMA should copy OAM byte 0");
+
+    bus.tick(TCycles(4));
+
+    assert_eq!(bus.read8(0xFE01), 0x02, "DMA should copy OAM byte 1");
+
+    bus.tick(TCycles(4 * 158));
+
+    assert_eq!(bus.read8(0xFE9F), 0xA0, "DMA should copy OAM byte 159");
+}
+
+#[test]
+fn cpu_oam_access_is_blocked_during_oam_dma() {
+    let mut bus = test_bus_with_rom_byte(0x0100, 0x42);
+
+    bus.write8(0xC000, 0x12);
+    bus.write8(0xFE00, 0x56);
+    bus.write8(0xFF80, 0x34);
     bus.write8(0xFF46, 0xC0);
 
-    assert_eq!(bus.read8(0xFE00), 0x00, "DMA should copy OAM byte 0");
-    assert_eq!(bus.read8(0xFE01), 0x01, "DMA should copy OAM byte 1");
-    assert_eq!(bus.read8(0xFE9F), 0x9F, "DMA should copy OAM byte 159");
+    bus.cpu_write8(0xFE01, 0x9A);
+    assert_eq!(
+        bus.read8(0xFE01),
+        0x00,
+        "CPU OAM writes should be ignored during active OAM DMA"
+    );
+
+    assert_eq!(
+        bus.cpu_read8(0xC000),
+        0x12,
+        "CPU WRAM reads should remain available during active OAM DMA"
+    );
+    assert_eq!(
+        bus.cpu_read8(0xFE00),
+        0xFF,
+        "CPU OAM reads should be blocked during active OAM DMA"
+    );
+    assert_eq!(
+        bus.cpu_read8(0xFF80),
+        0x34,
+        "CPU HRAM reads should remain available during active OAM DMA"
+    );
+
+    bus.cpu_write8(0xC001, 0x56);
+    bus.cpu_write8(0xFF81, 0x78);
+
+    assert_eq!(
+        bus.read8(0xC001),
+        0x56,
+        "CPU WRAM writes should remain available during active OAM DMA"
+    );
+    assert_eq!(
+        bus.read8(0xFF81),
+        0x78,
+        "CPU HRAM writes should remain available during active OAM DMA"
+    );
+}
+
+#[test]
+fn cpu_can_read_and_restart_oam_dma_register_during_active_dma() {
+    let mut bus = test_bus_with_rom_byte(0x0100, 0x42);
+
+    bus.write8(0xC000, 0x11);
+    bus.write8(0xD000, 0x22);
+    bus.write8(0xFF46, 0xC0);
+
+    assert_eq!(
+        bus.cpu_read8(0xFF46),
+        0xC0,
+        "CPU should be able to read the active OAM DMA source register"
+    );
+
+    bus.cpu_write8(0xFF46, 0xD0);
+    bus.tick(TCycles(8));
+
+    assert_eq!(
+        bus.read8(0xFE00),
+        0x22,
+        "CPU writes to FF46 during active DMA should restart from the new source page"
+    );
+}
+
+#[test]
+fn oam_dma_source_reads_treat_echo_as_extending_through_ffff() {
+    let mut bus = test_bus_with_rom_byte(0x0100, 0x42);
+
+    bus.write8(0xDE00, 0x11);
+    bus.write8(0xDF00, 0x22);
+
+    bus.write8(0xFF46, 0xFE);
+    bus.tick(TCycles(12));
+    assert_eq!(
+        bus.read8(0xFE00),
+        0x11,
+        "DMA source FE00 should read from DE00 on pre-CGB hardware"
+    );
+
+    bus.write8(0xFF46, 0xFF);
+    bus.tick(TCycles(12));
+    assert_eq!(
+        bus.read8(0xFE00),
+        0x22,
+        "DMA source FF00 should read from DF00 on pre-CGB hardware"
+    );
 }
 
 #[test]

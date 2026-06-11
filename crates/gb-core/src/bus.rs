@@ -18,6 +18,9 @@ use crate::{
 const WRAM_START: u16 = 0xC000;
 const WRAM_END: u16 = 0xDFFF;
 const WRAM_SIZE: usize = 0x2000;
+const ECHO_RAM_START: u16 = 0xE000;
+const ECHO_RAM_END: u16 = 0xFDFF;
+const ECHO_RAM_OFFSET: u16 = 0x2000;
 
 const HRAM_START: u16 = 0xFF80;
 const HRAM_END: u16 = 0xFFFE;
@@ -36,12 +39,13 @@ const CARTRIDGE_RAM_START: u16 = 0xA000;
 const CARTRIDGE_RAM_END: u16 = 0xBFFF;
 const OAM_START: u16 = 0xFE00;
 const OAM_END: u16 = 0xFE9F;
-const OAM_SIZE: u16 = 0x00A0;
+const OAM_SIZE: u8 = 0xA0;
 const UNUSABLE_OAM_START: u16 = 0xFEA0;
 const UNUSABLE_OAM_END: u16 = 0xFEFF;
 const DMA_ADDR: u16 = 0xFF46;
 const PPU_REGISTER_START: u16 = 0xFF40;
 const PPU_REGISTER_END: u16 = 0xFF4B;
+const CPU_MACHINE_CYCLE: TCycles = TCycles(4);
 
 /// CPU-facing memory bus.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -56,7 +60,54 @@ pub struct Bus {
     hram: [u8; HRAM_SIZE],
     interrupt_enable: InterruptFlags,
     interrupt_flags: InterruptFlags,
+    oam_dma: OamDma,
     clocked_cpu_cycles: TCycles,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct OamDma {
+    source_high: u8,
+    next_byte: u8,
+    startup_mcycles: u8,
+    active: bool,
+    elapsed_tcycles: u32,
+}
+
+impl OamDma {
+    const fn inactive() -> Self {
+        Self {
+            source_high: 0,
+            next_byte: 0,
+            startup_mcycles: 0,
+            active: false,
+            elapsed_tcycles: 0,
+        }
+    }
+
+    fn start(&mut self, source_high: u8) {
+        self.source_high = source_high;
+        self.next_byte = 0;
+        self.startup_mcycles = 2;
+        self.active = true;
+        self.elapsed_tcycles = 0;
+    }
+
+    fn is_active(self) -> bool {
+        self.active
+    }
+
+    fn source_address(self) -> u16 {
+        (u16::from(self.source_high) << 8) | u16::from(self.next_byte)
+    }
+
+    fn complete_byte(&mut self) {
+        self.next_byte = self.next_byte.wrapping_add(1);
+
+        if self.next_byte == OAM_SIZE {
+            self.active = false;
+            self.elapsed_tcycles = 0;
+        }
+    }
 }
 
 impl Bus {
@@ -74,6 +125,7 @@ impl Bus {
             hram: [0; HRAM_SIZE],
             interrupt_enable: InterruptFlags::default(),
             interrupt_flags: InterruptFlags::default(),
+            oam_dma: OamDma::inactive(),
             clocked_cpu_cycles: TCycles(0),
         }
     }
@@ -88,6 +140,7 @@ impl Bus {
             VRAM_START..=VRAM_END => self.ppu.read_vram(address - VRAM_START),
             CARTRIDGE_RAM_START..=CARTRIDGE_RAM_END => self.cartridge.read_ram(address),
             WRAM_START..=WRAM_END => self.wram[wram_index(address)],
+            ECHO_RAM_START..=ECHO_RAM_END => self.wram[wram_index(address - ECHO_RAM_OFFSET)],
             OAM_START..=OAM_END => self.ppu.read_oam(address - OAM_START),
             UNUSABLE_OAM_START..=UNUSABLE_OAM_END => 0xFF,
             JOYPAD_ADDR => self.joypad.read(),
@@ -95,6 +148,7 @@ impl Bus {
             TIMER_START..=TIMER_END => self.timer.read(address),
             INTERRUPT_FLAGS_ADDR => self.interrupt_flags.read_if(),
             0xFF10..=0xFF3F => self.apu.read(address),
+            DMA_ADDR => self.oam_dma.source_high,
             PPU_REGISTER_START..=PPU_REGISTER_END => self.ppu.read_register(address),
             HRAM_START..=HRAM_END => self.hram[hram_index(address)],
             INTERRUPT_ENABLE_ADDR => self.interrupt_enable.raw(),
@@ -111,6 +165,9 @@ impl Bus {
             VRAM_START..=VRAM_END => self.ppu.write_vram(address - VRAM_START, value),
             CARTRIDGE_RAM_START..=CARTRIDGE_RAM_END => self.cartridge.write_ram(address, value),
             WRAM_START..=WRAM_END => self.wram[wram_index(address)] = value,
+            ECHO_RAM_START..=ECHO_RAM_END => {
+                self.wram[wram_index(address - ECHO_RAM_OFFSET)] = value;
+            }
             OAM_START..=OAM_END => self.ppu.write_oam(address - OAM_START, value),
             UNUSABLE_OAM_START..=UNUSABLE_OAM_END => {}
             JOYPAD_ADDR => self.joypad.write(value),
@@ -118,7 +175,7 @@ impl Bus {
             TIMER_START..=TIMER_END => self.timer.write(address, value),
             INTERRUPT_FLAGS_ADDR => self.interrupt_flags.write_if(value),
             0xFF10..=0xFF3F => self.apu.write(address, value),
-            DMA_ADDR => self.run_oam_dma(value),
+            DMA_ADDR => self.oam_dma.start(value),
             PPU_REGISTER_START..=PPU_REGISTER_END => self.ppu.write_register(address, value),
             HRAM_START..=HRAM_END => self.hram[hram_index(address)] = value,
             INTERRUPT_ENABLE_ADDR => self.interrupt_enable.set_raw(value),
@@ -148,6 +205,7 @@ impl Bus {
         self.timer.tick(cycles, &mut self.interrupt_flags);
         self.ppu.tick(cycles, &mut self.interrupt_flags);
         self.apu.tick(cycles);
+        self.tick_oam_dma(cycles);
     }
 
     /// Starts accounting for CPU bus cycles during one logical CPU step.
@@ -163,28 +221,26 @@ impl Bus {
 
     /// Fetches an opcode byte for the CPU and advances one machine cycle.
     pub fn cpu_fetch8(&mut self, address: u16) -> u8 {
-        let value = self.read8(address);
+        let value = self.cpu_read8_during_dma(address);
         self.cpu_idle_mcycle();
         value
     }
 
     /// Reads one byte for the CPU and advances one machine cycle.
     pub fn cpu_read8(&mut self, address: u16) -> u8 {
-        let value = self.read8(address);
+        let value = self.cpu_read8_during_dma(address);
         self.cpu_idle_mcycle();
         value
     }
 
     /// Writes one byte for the CPU and advances one machine cycle.
     pub fn cpu_write8(&mut self, address: u16, value: u8) {
-        self.write8(address, value);
+        self.cpu_write8_during_dma(address, value);
         self.cpu_idle_mcycle();
     }
 
     /// Advances one internal CPU machine cycle without a memory transfer.
     pub fn cpu_idle_mcycle(&mut self) {
-        const CPU_MACHINE_CYCLE: TCycles = TCycles(4);
-
         self.tick(CPU_MACHINE_CYCLE);
         self.clocked_cpu_cycles.0 += CPU_MACHINE_CYCLE.0;
     }
@@ -272,14 +328,59 @@ impl Bus {
         InterruptFlags::first_pending(self.interrupt_enable, self.interrupt_flags)
     }
 
-    fn run_oam_dma(&mut self, value: u8) {
-        let source_start = u16::from(value) << 8;
+    fn cpu_read8_during_dma(&self, address: u16) -> u8 {
+        if self.oam_dma.is_active() && cpu_oam_dma_blocks_address(address) {
+            return 0xFF;
+        }
 
-        for offset in 0..OAM_SIZE {
-            let byte = self.read8(source_start.wrapping_add(offset));
-            self.ppu.write_oam(offset, byte);
+        self.read8(address)
+    }
+
+    fn cpu_write8_during_dma(&mut self, address: u16, value: u8) {
+        if self.oam_dma.is_active() && cpu_oam_dma_blocks_address(address) {
+            return;
+        }
+
+        self.write8(address, value);
+    }
+
+    fn tick_oam_dma(&mut self, cycles: TCycles) {
+        if !self.oam_dma.is_active() {
+            return;
+        }
+
+        self.oam_dma.elapsed_tcycles += cycles.0;
+
+        while self.oam_dma.is_active() && self.oam_dma.elapsed_tcycles >= CPU_MACHINE_CYCLE.0 {
+            self.oam_dma.elapsed_tcycles -= CPU_MACHINE_CYCLE.0;
+
+            if self.oam_dma.startup_mcycles > 0 {
+                self.oam_dma.startup_mcycles -= 1;
+                continue;
+            }
+
+            let source_address = self.oam_dma.source_address();
+            let destination_offset = u16::from(self.oam_dma.next_byte);
+            let byte = self.read_oam_dma_source(source_address);
+
+            self.ppu.write_oam(destination_offset, byte);
+            self.oam_dma.complete_byte();
         }
     }
+
+    fn read_oam_dma_source(&self, address: u16) -> u8 {
+        let address = if address >= ECHO_RAM_START {
+            address - ECHO_RAM_OFFSET
+        } else {
+            address
+        };
+
+        self.read8(address)
+    }
+}
+
+fn cpu_oam_dma_blocks_address(address: u16) -> bool {
+    matches!(address, OAM_START..=UNUSABLE_OAM_END)
 }
 
 fn wram_index(address: u16) -> usize {

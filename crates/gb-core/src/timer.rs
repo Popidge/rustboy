@@ -21,7 +21,7 @@ pub struct Timer {
     tma: u8,
     tac: u8,
     overflow_delay: Option<u8>,
-    reload_tma_latch: Option<u8>,
+    reload_mcycle_active: bool,
 }
 
 /// Timer state captured alongside a test-only bus-cycle trace record.
@@ -42,7 +42,7 @@ impl Timer {
             tma: 0,
             tac: 0,
             overflow_delay: None,
-            reload_tma_latch: None,
+            reload_mcycle_active: false,
         }
     }
 
@@ -65,7 +65,7 @@ impl Timer {
                 self.increment_on_falling_edge(old_signal, self.timer_signal());
             }
             TIMA_ADDR => {
-                if self.overflow_delay != Some(1) {
+                if !self.reload_mcycle_active {
                     self.tima = value;
                     self.overflow_delay = None;
                 }
@@ -90,17 +90,17 @@ impl Timer {
         }
     }
 
-    /// Captures TMA at the start of a CPU machine cycle.
+    /// Marks whether the coming CPU machine cycle is the timer reload cycle.
     ///
-    /// A TMA write in the M-cycle where the reload transfer occurs updates
-    /// TMA, but the transfer itself still uses this latched old value.
+    /// A TIMA write in this M-cycle is overwritten by the reload, while a TMA
+    /// write updates the value copied into TIMA at the cycle's end.
     pub(crate) fn begin_cpu_mcycle(&mut self) {
-        self.reload_tma_latch = Some(self.tma);
+        self.reload_mcycle_active = self.overflow_delay == Some(4);
     }
 
-    /// Ends the current CPU machine cycle's TMA reload latch.
+    /// Ends the current CPU machine cycle's reload-window marker.
     pub(crate) fn end_cpu_mcycle(&mut self) {
-        self.reload_tma_latch = None;
+        self.reload_mcycle_active = false;
     }
 
     /// Returns the divider phase used to align the DMG internal serial clock.
@@ -122,7 +122,7 @@ impl Timer {
     fn tick_overflow_delay(&mut self, interrupts: &mut InterruptFlags) {
         if let Some(delay) = self.overflow_delay {
             if delay == 1 {
-                self.tima = self.reload_tma_latch.unwrap_or(self.tma);
+                self.tima = self.tma;
                 self.overflow_delay = None;
                 interrupts.request(Interrupt::Timer);
             } else {
@@ -334,9 +334,10 @@ mod tests {
         timer.write(0xFF07, 0x05);
 
         timer.tick(TCycles(16), &mut interrupts);
-        timer.tick(TCycles(3), &mut interrupts);
+        timer.begin_cpu_mcycle();
         timer.write(0xFF05, 0x99);
-        timer.tick(TCycles(1), &mut interrupts);
+        timer.tick(TCycles(4), &mut interrupts);
+        timer.end_cpu_mcycle();
 
         assert_eq!(
             timer.read(0xFF05),
@@ -400,7 +401,7 @@ mod tests {
     }
 
     #[test]
-    fn cpu_mcycle_tma_write_on_reload_uses_the_prewrite_tma_latch() {
+    fn cpu_mcycle_tma_write_on_reload_updates_the_value_copied_to_tima() {
         let mut timer = Timer::new();
         let mut interrupts = InterruptFlags::default();
         timer.write(0xFF05, 0xFF);
@@ -416,8 +417,8 @@ mod tests {
 
         assert_eq!(
             timer.read(0xFF05),
-            0x42,
-            "a same-M-cycle TMA write must not replace the value already latched for TIMA reload"
+            0x77,
+            "a reload-M-cycle TMA write should supply the value copied into TIMA"
         );
         assert_eq!(
             timer.read(0xFF06),

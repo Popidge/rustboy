@@ -17,6 +17,7 @@ use std::{
     fs,
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
+    thread,
     time::{Duration, Instant},
 };
 use winit::{
@@ -40,6 +41,7 @@ const DMG_CPU_CLOCK_HZ: u64 = 4_194_304;
 const DMG_TCYCLES_PER_FRAME: u64 = 456 * 154;
 const FRAME_HASH_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
 const FRAME_HASH_PRIME: u64 = 0x0000_0100_0000_01B3;
+const EMULATION_THREAD_STACK_SIZE: usize = 8 * 1024 * 1024;
 
 fn main() -> Result<(), Box<dyn Error>> {
     let options = Options::parse(env::args().skip(1))?;
@@ -204,19 +206,21 @@ fn run_serial_output(
     boot_rom: Option<DmgBootRom>,
     steps: usize,
 ) -> Result<(), Box<dyn Error>> {
-    let mut game_boy = new_game_boy(cartridge, boot_rom);
+    run_on_emulation_thread(move || {
+        let mut game_boy = new_game_boy(cartridge, boot_rom);
 
-    for _ in 0..steps {
-        game_boy.step()?;
-    }
+        for _ in 0..steps {
+            game_boy.step().map_err(|error| error.to_string())?;
+        }
 
-    let output = game_boy.take_serial_output();
+        let output = game_boy.take_serial_output();
 
-    if !output.is_empty() {
-        println!("Serial: {}", String::from_utf8_lossy(&output));
-    }
+        if !output.is_empty() {
+            println!("Serial: {}", String::from_utf8_lossy(&output));
+        }
 
-    Ok(())
+        Ok(())
+    })
 }
 
 fn run_mooneye_output(
@@ -224,45 +228,49 @@ fn run_mooneye_output(
     boot_rom: Option<DmgBootRom>,
     steps: usize,
 ) -> Result<(), Box<dyn Error>> {
-    let mut game_boy = new_game_boy(cartridge, boot_rom);
+    run_on_emulation_thread(move || {
+        let mut game_boy = new_game_boy(cartridge, boot_rom);
 
-    for step in 0..steps {
-        match game_boy.step() {
-            Ok(_) => {}
-            Err(gb_core::cpu::CpuError::UnimplementedOpcode { pc, opcode }) if opcode == 0xED => {
-                let registers = game_boy.registers();
-                let passed = registers.b == 3
-                    && registers.c == 5
-                    && registers.d == 8
-                    && registers.e == 13
-                    && registers.h == 21
-                    && registers.l == 34;
+        for step in 0..steps {
+            match game_boy.step() {
+                Ok(_) => {}
+                Err(gb_core::cpu::CpuError::UnimplementedOpcode { pc, opcode })
+                    if opcode == 0xED =>
+                {
+                    let registers = game_boy.registers();
+                    let passed = registers.b == 3
+                        && registers.c == 5
+                        && registers.d == 8
+                        && registers.e == 13
+                        && registers.h == 21
+                        && registers.l == 34;
 
-                println!(
-                    "Mooneye: {} step={} pc={pc:04X} opcode={opcode:02X} B={} C={} D={} E={} H={} L={}",
-                    if passed { "Passed" } else { "Failed" },
-                    step + 1,
-                    registers.b,
-                    registers.c,
-                    registers.d,
-                    registers.e,
-                    registers.h,
-                    registers.l
-                );
+                    println!(
+                        "Mooneye: {} step={} pc={pc:04X} opcode={opcode:02X} B={} C={} D={} E={} H={} L={}",
+                        if passed { "Passed" } else { "Failed" },
+                        step + 1,
+                        registers.b,
+                        registers.c,
+                        registers.d,
+                        registers.e,
+                        registers.h,
+                        registers.l
+                    );
 
-                return Ok(());
+                    return Ok(());
+                }
+                Err(error) => return Err(error.to_string()),
             }
-            Err(error) => return Err(error.into()),
         }
-    }
 
-    let registers = game_boy.registers();
-    println!(
-        "Mooneye: Timeout steps={steps} B={} C={} D={} E={} H={} L={}",
-        registers.b, registers.c, registers.d, registers.e, registers.h, registers.l
-    );
+        let registers = game_boy.registers();
+        println!(
+            "Mooneye: Timeout steps={steps} B={} C={} D={} E={} H={} L={}",
+            registers.b, registers.c, registers.d, registers.e, registers.h, registers.l
+        );
 
-    Ok(())
+        Ok(())
+    })
 }
 
 fn run_frame_dump(
@@ -271,15 +279,39 @@ fn run_frame_dump(
     frames: usize,
     dump_mode: FrameDumpMode,
 ) -> Result<(), Box<dyn Error>> {
-    let mut game_boy = new_game_boy(cartridge, boot_rom);
+    run_on_emulation_thread(move || {
+        let mut game_boy = new_game_boy(cartridge, boot_rom);
 
-    for _ in 0..frames {
-        game_boy.run_until_frame()?;
+        for _ in 0..frames {
+            game_boy
+                .run_until_frame()
+                .map_err(|error| error.to_string())?;
+        }
+
+        dump_framebuffer(game_boy.framebuffer(), frames, dump_mode);
+
+        Ok(())
+    })
+}
+
+/// Runs bounded headless emulation away from the platform main-thread stack.
+///
+/// Debug builds can exceed the Windows main-thread stack while stepping the
+/// emulator. Windowed execution must remain on the main thread, but the
+/// headless diagnostic modes have no platform-thread requirement.
+fn run_on_emulation_thread(
+    task: impl FnOnce() -> Result<(), String> + Send + 'static,
+) -> Result<(), Box<dyn Error>> {
+    let worker = thread::Builder::new()
+        .name("gb-emulation".to_string())
+        .stack_size(EMULATION_THREAD_STACK_SIZE)
+        .spawn(task)?;
+
+    match worker.join() {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(error)) => Err(std::io::Error::other(error).into()),
+        Err(_) => Err(std::io::Error::other("emulation worker panicked").into()),
     }
-
-    dump_framebuffer(game_boy.framebuffer(), frames, dump_mode);
-
-    Ok(())
 }
 
 fn dump_framebuffer(framebuffer: &[u32], frame_count: usize, mode: FrameDumpMode) {
@@ -1785,6 +1817,28 @@ fn copy_framebuffer(source: &[u32], target: &mut [u8]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn minimal_cartridge_with_entry(entry: &[u8]) -> Cartridge {
+        let mut rom = vec![0; 0x8000];
+        rom[0x0100..0x0100 + entry.len()].copy_from_slice(entry);
+        rom[0x0147] = 0x00;
+        rom[0x0148] = 0x00;
+        rom[0x0149] = 0x00;
+
+        let mut checksum = 0_u8;
+        for byte in &rom[0x0134..=0x014C] {
+            checksum = checksum.wrapping_sub(*byte).wrapping_sub(1);
+        }
+        rom[0x014D] = checksum;
+
+        Cartridge::from_bytes(rom).expect("generated ROM should be a valid ROM-only cartridge")
+    }
+
+    #[test]
+    fn headless_serial_runner_steps_on_dedicated_emulation_stack() {
+        run_serial_output(minimal_cartridge_with_entry(&[0x00]), None, 1)
+            .expect("a NOP should execute on the dedicated emulation stack");
+    }
 
     #[test]
     fn dmg_frame_interval_matches_hardware_refresh_rate() {

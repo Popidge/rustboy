@@ -1,5 +1,50 @@
 # Milestones
 
+## 0053b: Run headless desktop emulation on a dedicated stack
+
+Date: 2026-06-19
+
+Status: Complete
+
+### Goal
+
+Make the `gb-desktop` headless diagnostic modes usable in debug builds after
+their first CPU step overflowed the Windows main-thread stack.
+
+### Changes
+
+- Run `--serial-steps`, `--mooneye-steps`, and `--frames` in a named
+  `gb-emulation` worker with an explicit 8 MiB stack.
+- Construct `GameBoy` inside that worker so its fixed hardware arrays and CPU
+  execution stay off the platform main thread.
+- Added a desktop regression test that executes one generated-ROM NOP through
+  the serial runner.
+
+### Tests
+
+- `cargo fmt`
+- `cargo test -p gb-desktop headless_serial_runner_steps_on_dedicated_emulation_stack`
+- `cargo run -p gb-desktop -- test-roms/age-test-roms/ly/ly-dmgC-cgbBC.gb --serial-steps 1`
+- `cargo run -p gb-desktop -- test-roms/age-test-roms/ly/ly-dmgC-cgbBC.gb --boot-rom dmg_boot.bin --serial-steps 1`
+- `cargo test`
+- `cargo clippy --all-targets --all-features`
+
+### Decisions
+
+- Kept fixed hardware arrays and core ownership unchanged; the problem was
+  debug main-thread stack pressure in desktop runner execution, not boot-ROM
+  mapping.
+- Limited the worker to bounded headless modes. Windowed execution remains on
+  the OS main thread and should be investigated separately if it shows the
+  same pressure.
+- Added no dependencies.
+
+### Notes
+
+- The AGE DMG one-step smoke command now completes in the debug profile with
+  no `--boot-rom`; the prior failure occurred before this change even without
+  boot-ROM mapping.
+
 ## 0053: Add optional user-supplied DMG boot-ROM startup
 
 Date: 2026-06-19

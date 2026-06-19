@@ -107,6 +107,18 @@ impl GameBoy {
         self.bus.take_serial_output()
     }
 
+    /// Drains the test-only CPU bus-cycle trace.
+    #[cfg(any(test, feature = "test-trace"))]
+    pub fn take_cycle_trace(&mut self) -> Vec<bus::BusCycleRecord> {
+        self.bus.take_cycle_trace()
+    }
+
+    /// Drains the test-only one-T-cycle Bus dispatcher trace.
+    #[cfg(any(test, feature = "test-trace"))]
+    pub fn take_tcycle_trace(&mut self) -> Vec<bus::BusTcycleRecord> {
+        self.bus.take_tcycle_trace()
+    }
+
     /// Returns generated audio samples without draining them.
     #[must_use]
     pub fn audio_samples(&self) -> &[StereoSample] {

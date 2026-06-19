@@ -4,7 +4,7 @@
 
 Date: 2026-06-19
 
-Status: Partial
+Status: Complete
 
 ### Goal
 
@@ -26,35 +26,38 @@ with timed, interrupt-producing DMG transfers.
   supplies the reload value while Timer IF is still requested.
 - Marked the timer's reload M-cycle at the Bus cycle boundary so TIMA writes
   are overwritten while TMA writes provide the value copied into TIMA.
+- Refined that model into an explicit four-T-cycle post-reload load window:
+  TIMA writes are ignored while it is active, and TMA writes update the value
+  continuously visible through TIMA.
+- Extended the test-only trace snapshot with divider and timer reload-window
+  state, and exposed trace draining through `GameBoy` when test tracing is on.
 
 ### Tests
 
 - `cargo fmt`
 - `cargo test` (215 passed)
+- `cargo test -p gb-core --features test-trace` (185 passed)
 - `cargo clippy --all-targets --all-features`
-- Gate passed: Mooneye `timer/tima_reload` (breakpoint-register result,
-  20-second timeout).
-- Gates failed: Mooneye `timer/tima_write_reloading`,
-  `timer/tma_write_reloading`, and `serial/boot_sclk_align-dmgABCmgb` (all
-  terminate with the failure signature `B=C=D=E=H=L=0x66`).
+- Gates passed: Mooneye `timer/tima_reload`, `timer/tima_write_reloading`, and
+  `timer/tma_write_reloading` (breakpoint-register result, 20-second timeout
+  per ROM).
+- Focused generated-Rust tests cover serial internal/external clock start,
+  completion, restart, divider alignment, SB shifting, and Serial IF.
 
 ### Decisions
 
 - Serial timing and IF requests remain Bus-dispatched; completed-byte capture
   is a test observer rather than an immediate transfer side effect.
-- The timer's current reload-window state model remains in place because the
-  failing write ROMs require finer CPU write-versus-reload sub-cycle ordering.
-- Reload-cycle state follows the documented distinction between TIMA and TMA
-  writes; it is a hardware model improvement independent of the remaining gate
-  failures.
+- Timer overflow has an explicit post-reload load window instead of treating
+  reload as an instantaneous one-T-cycle state.
 - Added no dependencies.
 
 ### Notes
 
-- The serial boot-clock gate also depends on reset/boot divider alignment, so
-  it remains diagnostic until the later optional boot-ROM/reset milestone.
-- Next step: expose timer reload phase and CPU write timing within a machine
-  cycle, then use a short trace to distinguish the two write-reloading ROMs.
+- Mooneye `serial/boot_sclk_align-dmgABCmgb` remains a diagnostic failure: it
+  checks boot-clock alignment, while this emulator intentionally uses the
+  deterministic post-boot fast-start path until milestone 0053. It is not a
+  substitute for a non-boot serial transfer gate.
 
 ## 0051: Complete DMG OAM-DMA arbitration
 

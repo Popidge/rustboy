@@ -77,10 +77,12 @@ pub struct BusTraceState {
     pub ppu_mode: crate::ppu::PpuMode,
     pub interrupt_flags: u8,
     pub interrupt_enable: u8,
+    pub timer_div_counter: u16,
     pub timer_tima: u8,
     pub timer_tma: u8,
     /// Remaining T-cycles before the pending TIMA reload, if any.
     pub timer_overflow_delay: Option<u8>,
+    pub timer_reload_window: u8,
     pub dma_active: bool,
     pub dma_next_byte: u8,
     pub dma_startup_mcycles: u8,
@@ -331,7 +333,6 @@ impl Bus {
 
     /// Fetches an opcode byte for the CPU and advances one machine cycle.
     pub fn cpu_fetch8(&mut self, address: u16) -> u8 {
-        self.begin_cpu_mcycle();
         let value = self.cpu_read8_during_dma(address);
         self.record_cycle(BusCycleKind::OpcodeFetch, Some(address), Some(value));
         self.advance_cpu_mcycle();
@@ -340,7 +341,6 @@ impl Bus {
 
     /// Reads one byte for the CPU and advances one machine cycle.
     pub fn cpu_read8(&mut self, address: u16) -> u8 {
-        self.begin_cpu_mcycle();
         let value = self.cpu_read8_during_dma(address);
         self.record_cycle(BusCycleKind::Read, Some(address), Some(value));
         self.advance_cpu_mcycle();
@@ -349,7 +349,6 @@ impl Bus {
 
     /// Writes one byte for the CPU and advances one machine cycle.
     pub fn cpu_write8(&mut self, address: u16, value: u8) {
-        self.begin_cpu_mcycle();
         self.cpu_write8_during_dma(address, value);
         self.record_cycle(BusCycleKind::Write, Some(address), Some(value));
         self.advance_cpu_mcycle();
@@ -357,19 +356,13 @@ impl Bus {
 
     /// Advances one internal CPU machine cycle without a memory transfer.
     pub fn cpu_idle_mcycle(&mut self) {
-        self.begin_cpu_mcycle();
         self.record_cycle(BusCycleKind::Idle, None, None);
         self.advance_cpu_mcycle();
     }
 
     fn advance_cpu_mcycle(&mut self) {
         self.tick(CPU_MACHINE_CYCLE);
-        self.timer.end_cpu_mcycle();
         self.clocked_cpu_cycles.0 += CPU_MACHINE_CYCLE.0;
-    }
-
-    fn begin_cpu_mcycle(&mut self) {
-        self.timer.begin_cpu_mcycle();
     }
 
     fn tick_tcycle(&mut self) {
@@ -542,9 +535,11 @@ impl Bus {
             ppu_mode,
             interrupt_flags: self.interrupt_flags.raw(),
             interrupt_enable: self.interrupt_enable.raw(),
+            timer_div_counter: timer.div_counter,
             timer_tima: timer.tima,
             timer_tma: timer.tma,
             timer_overflow_delay: timer.overflow_delay,
+            timer_reload_window: timer.reload_window,
             dma_active: self.oam_dma.is_active(),
             dma_next_byte: self.oam_dma.next_byte,
             dma_startup_mcycles: self.oam_dma.startup_mcycles,

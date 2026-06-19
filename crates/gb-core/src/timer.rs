@@ -21,16 +21,18 @@ pub struct Timer {
     tma: u8,
     tac: u8,
     overflow_delay: Option<u8>,
-    reload_mcycle_active: bool,
+    reload_window: u8,
 }
 
 /// Timer state captured alongside a test-only bus-cycle trace record.
 #[cfg(any(test, feature = "test-trace"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct TimerTraceState {
+    pub div_counter: u16,
     pub tima: u8,
     pub tma: u8,
     pub overflow_delay: Option<u8>,
+    pub reload_window: u8,
 }
 
 impl Timer {
@@ -42,7 +44,7 @@ impl Timer {
             tma: 0,
             tac: 0,
             overflow_delay: None,
-            reload_mcycle_active: false,
+            reload_window: 0,
         }
     }
 
@@ -65,12 +67,17 @@ impl Timer {
                 self.increment_on_falling_edge(old_signal, self.timer_signal());
             }
             TIMA_ADDR => {
-                if !self.reload_mcycle_active {
+                if self.overflow_delay != Some(1) && self.reload_window == 0 {
                     self.tima = value;
                     self.overflow_delay = None;
                 }
             }
-            TMA_ADDR => self.tma = value,
+            TMA_ADDR => {
+                self.tma = value;
+                if self.reload_window > 0 {
+                    self.tima = value;
+                }
+            }
             TAC_ADDR => {
                 let old_signal = self.timer_signal();
                 self.tac = value & 0x07;
@@ -90,19 +97,6 @@ impl Timer {
         }
     }
 
-    /// Marks whether the coming CPU machine cycle is the timer reload cycle.
-    ///
-    /// A TIMA write in this M-cycle is overwritten by the reload, while a TMA
-    /// write updates the value copied into TIMA at the cycle's end.
-    pub(crate) fn begin_cpu_mcycle(&mut self) {
-        self.reload_mcycle_active = self.overflow_delay == Some(4);
-    }
-
-    /// Ends the current CPU machine cycle's reload-window marker.
-    pub(crate) fn end_cpu_mcycle(&mut self) {
-        self.reload_mcycle_active = false;
-    }
-
     /// Returns the divider phase used to align the DMG internal serial clock.
     #[must_use]
     pub(crate) fn serial_clock_phase(&self) -> u16 {
@@ -113,9 +107,11 @@ impl Timer {
     #[must_use]
     pub(crate) fn trace_state(&self) -> TimerTraceState {
         TimerTraceState {
+            div_counter: self.div_counter,
             tima: self.tima,
             tma: self.tma,
             overflow_delay: self.overflow_delay,
+            reload_window: self.reload_window,
         }
     }
 
@@ -124,10 +120,13 @@ impl Timer {
             if delay == 1 {
                 self.tima = self.tma;
                 self.overflow_delay = None;
+                self.reload_window = 4;
                 interrupts.request(Interrupt::Timer);
             } else {
                 self.overflow_delay = Some(delay - 1);
             }
+        } else if self.reload_window > 0 {
+            self.reload_window -= 1;
         }
     }
 
@@ -334,10 +333,9 @@ mod tests {
         timer.write(0xFF07, 0x05);
 
         timer.tick(TCycles(16), &mut interrupts);
-        timer.begin_cpu_mcycle();
+        timer.tick(TCycles(3), &mut interrupts);
         timer.write(0xFF05, 0x99);
-        timer.tick(TCycles(4), &mut interrupts);
-        timer.end_cpu_mcycle();
+        timer.tick(TCycles(1), &mut interrupts);
 
         assert_eq!(
             timer.read(0xFF05),
@@ -401,29 +399,26 @@ mod tests {
     }
 
     #[test]
-    fn cpu_mcycle_tma_write_on_reload_updates_the_value_copied_to_tima() {
+    fn reload_window_ignores_tima_writes_and_tracks_tma_writes() {
         let mut timer = Timer::new();
         let mut interrupts = InterruptFlags::default();
         timer.write(0xFF05, 0xFF);
         timer.write(0xFF06, 0x42);
         timer.write(0xFF07, 0x05);
 
-        timer.tick(TCycles(16), &mut interrupts);
-        timer.tick(TCycles(3), &mut interrupts);
-        timer.begin_cpu_mcycle();
-        timer.write(0xFF06, 0x77);
-        timer.tick(TCycles(1), &mut interrupts);
-        timer.end_cpu_mcycle();
+        timer.tick(TCycles(20), &mut interrupts);
+        timer.write(0xFF05, 0x99);
+        assert_eq!(
+            timer.read(0xFF05),
+            0x42,
+            "TIMA writes remain overridden while the reload load signal is active"
+        );
 
+        timer.write(0xFF06, 0x77);
         assert_eq!(
             timer.read(0xFF05),
             0x77,
-            "a reload-M-cycle TMA write should supply the value copied into TIMA"
-        );
-        assert_eq!(
-            timer.read(0xFF06),
-            0x77,
-            "the TMA register should still update"
+            "TIMA should continue tracking TMA during the reload window"
         );
     }
 }

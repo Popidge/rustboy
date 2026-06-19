@@ -538,6 +538,15 @@ impl Cpu {
     fn service_interrupt_or_halt(&mut self, bus: &mut Bus) -> Option<TCycles> {
         let pending = bus.pending_interrupt();
 
+        if self.run_state == CpuRunState::Stopped {
+            if !bus.take_stop_wake_request() {
+                bus.cpu_idle_mcycle();
+                return Some(TCycles(4));
+            }
+
+            self.run_state = CpuRunState::Running;
+        }
+
         if self.run_state == CpuRunState::Halted && pending.is_none() {
             self.prefetched_opcode = None;
             bus.cpu_idle_mcycle();
@@ -548,20 +557,26 @@ impl Cpu {
             self.run_state = CpuRunState::Running;
         }
 
-        if self.ime {
-            if let Some(interrupt) = pending {
-                self.prefetched_opcode = None;
-                self.ime = false;
-                self.ime_enable_pending = false;
-                for _ in 0..3 {
-                    bus.cpu_idle_mcycle();
-                }
-                bus.clear_interrupt(interrupt);
-                self.push16(bus, self.registers.pc);
-                self.registers.pc = interrupt.vector();
-
-                return Some(TCycles(20));
+        if self.ime && pending.is_some() {
+            self.prefetched_opcode = None;
+            self.ime = false;
+            self.ime_enable_pending = false;
+            // Interrupt recognition begins before opcode fetch, but the
+            // selected vector is sampled after the entry's internal cycles.
+            // This lets a higher-priority request raised during entry win
+            // without giving CPU code direct timing control.
+            for _ in 0..2 {
+                bus.cpu_idle_mcycle();
             }
+            let interrupt = bus
+                .pending_interrupt()
+                .expect("an interrupt accepted for service should remain pending through entry");
+            bus.cpu_idle_mcycle();
+            bus.clear_interrupt(interrupt);
+            self.push16(bus, self.registers.pc);
+            self.registers.pc = interrupt.vector();
+
+            return Some(TCycles(20));
         }
 
         None
@@ -3728,25 +3743,100 @@ mod tests {
     }
 
     #[test]
-    fn stop_sets_documented_placeholder_state_and_consumes_padding_byte() {
+    fn stop_waits_for_a_joypad_press_and_consumes_padding_byte() {
         let mut bus = bus_with_bytes(&[(0x0100, 0x10), (0x0101, 0x00)]);
         let mut cpu = Cpu::new_dmg_post_boot();
 
         let cycles = cpu.step(&mut bus);
 
-        assert_eq!(
-            cycles,
-            Ok(TCycles(4)),
-            "STOP placeholder should take 4 T-cycles"
-        );
-        assert!(
-            cpu.stopped(),
-            "STOP should enter the placeholder stopped state"
-        );
+        assert_eq!(cycles, Ok(TCycles(4)), "STOP should take 4 T-cycles");
+        assert!(cpu.stopped(), "STOP should enter the stopped state");
         assert_eq!(
             cpu.registers().pc,
             0x0102,
             "STOP should consume its padding byte"
+        );
+
+        let cycles = cpu.step(&mut bus);
+        assert_eq!(cycles, Ok(TCycles(4)), "STOP should idle while asleep");
+        assert!(
+            cpu.stopped(),
+            "non-joypad interrupts must not wake DMG STOP"
+        );
+
+        bus.set_button(crate::joypad::Button::Start, true);
+        let cycles = cpu.step(&mut bus);
+        assert_eq!(
+            cycles,
+            Ok(TCycles(4)),
+            "wake should resume at the next opcode"
+        );
+        assert!(!cpu.stopped(), "a new joypad press should wake DMG STOP");
+        assert_eq!(
+            cpu.registers().pc,
+            0x0103,
+            "wake should execute the next opcode"
+        );
+    }
+
+    #[test]
+    fn interrupt_entry_resamples_priority_after_internal_cycles() {
+        let mut bus = bus_with_bytes(&[(0x0100, 0x00)]);
+        let mut cpu = Cpu::new_dmg_post_boot();
+        cpu.registers.sp = 0xC100;
+        cpu.ime = true;
+        bus.write8(0xFFFF, Interrupt::Timer.mask() | Interrupt::Joypad.mask());
+        bus.request_interrupt(Interrupt::Joypad);
+
+        // Arrange for TIMA to overflow on the first entry T-cycle and reload
+        // before the entry phase chooses its interrupt vector.
+        bus.tick(TCycles(15));
+        bus.write8(0xFF05, 0xFF);
+        bus.write8(0xFF06, 0x42);
+        bus.write8(0xFF07, 0x05);
+
+        let cycles = cpu.step(&mut bus);
+
+        assert_eq!(
+            cycles,
+            Ok(TCycles(20)),
+            "interrupt entry takes five M-cycles"
+        );
+        assert_eq!(
+            cpu.registers().pc,
+            Interrupt::Timer.vector(),
+            "a higher-priority request raised during entry should win at re-sample"
+        );
+        assert_eq!(
+            bus.interrupt_flags(),
+            Interrupt::Joypad.mask(),
+            "only the re-sampled Timer request should be cleared"
+        );
+    }
+
+    #[test]
+    fn interrupt_entry_discards_a_tail_prefetched_opcode() {
+        let mut bus = bus_with_bytes(&[(0x0100, 0x00), (0x0101, 0x3C)]);
+        let mut cpu = Cpu::new_dmg_post_boot();
+        cpu.registers.sp = 0xC100;
+
+        cpu.step(&mut bus).expect("NOP should execute");
+        assert_eq!(cpu.registers().pc, 0x0101, "NOP should prefetch INC A");
+
+        cpu.ime = true;
+        bus.write8(0xFFFF, Interrupt::VBlank.mask());
+        bus.request_interrupt(Interrupt::VBlank);
+        cpu.step(&mut bus).expect("interrupt should be serviced");
+
+        assert_eq!(
+            bus.read16(cpu.registers().sp),
+            0x0101,
+            "interrupt entry should push the prefetched opcode address"
+        );
+        assert_eq!(
+            cpu.registers().pc,
+            0x0040,
+            "interrupt should replace the prefetched flow"
         );
     }
 

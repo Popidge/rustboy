@@ -1,5 +1,45 @@
 # Milestones
 
+## 0050: Tighten CPU exceptional sequencing
+
+Date: 2026-06-19
+
+Status: Complete
+
+### Goal
+
+Make interrupt entry, HALT/STOP wake behaviour, and opcode-prefetch cancellation
+explicit at the Bus-cycle boundary.
+
+### Changes
+
+- Re-sample the highest-priority pending interrupt after interrupt-entry
+  internal cycles, before clearing IF and choosing the vector.
+- Discard a tail-prefetched opcode when accepting an interrupt while preserving
+  its address as the pushed return PC.
+- Keep STOP asleep until a new joypad press, tracked by Bus independently of
+  IE, then resume at the next opcode.
+- Added focused CPU tests for late priority re-sampling, prefetch discard, and
+  STOP wake.
+
+### Tests
+
+- `cargo fmt`
+- `cargo test` (210 passed)
+- `cargo clippy --all-targets --all-features`
+- Gate passed: Blargg `halt_bug` (one ROM, serial result, 20-second timeout).
+
+### Decisions
+
+- CPU exceptional state remains owned by `Cpu`; Bus only supplies ordered
+  cycles, pending interrupt state, and the DMG joypad STOP wake event.
+- Added no dependencies and changed no ownership boundary.
+
+### Notes
+
+- The local Mooneye and AGE interrupt/HALT suites remain useful follow-up
+  diagnostic gates; this milestone adds no compatibility patches for them.
+
 ## 0049: Install the one-T-cycle Bus dispatcher
 
 Date: 2026-06-19

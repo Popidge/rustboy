@@ -149,6 +149,7 @@ pub struct Bus {
     hram: [u8; HRAM_SIZE],
     interrupt_enable: InterruptFlags,
     interrupt_flags: InterruptFlags,
+    stop_wake_requested: bool,
     oam_dma: OamDma,
     clocked_cpu_cycles: TCycles,
     elapsed_tcycles: u64,
@@ -219,6 +220,7 @@ impl Bus {
             hram: [0; HRAM_SIZE],
             interrupt_enable: InterruptFlags::default(),
             interrupt_flags: InterruptFlags::default(),
+            stop_wake_requested: false,
             oam_dma: OamDma::inactive(),
             clocked_cpu_cycles: TCycles(0),
             elapsed_tcycles: 0,
@@ -434,8 +436,15 @@ impl Bus {
 
     /// Updates one joypad button state and requests an interrupt on new presses.
     pub fn set_button(&mut self, button: Button, pressed: bool) {
+        let was_pressed = self.joypad.is_pressed(button);
         self.joypad
             .set_button(button, pressed, &mut self.interrupt_flags);
+
+        // On DMG, a new joypad press is a wake source for STOP regardless of
+        // whether the Joypad interrupt is enabled.
+        if pressed && !was_pressed {
+            self.stop_wake_requested = true;
+        }
     }
 
     #[must_use]
@@ -473,6 +482,11 @@ impl Bus {
     /// Clears an interrupt request from the IF register.
     pub fn clear_interrupt(&mut self, interrupt: Interrupt) {
         self.interrupt_flags.clear(interrupt);
+    }
+
+    /// Consumes a pending DMG STOP wake caused by a new joypad press.
+    pub(crate) fn take_stop_wake_request(&mut self) -> bool {
+        std::mem::take(&mut self.stop_wake_requested)
     }
 
     #[cfg(any(test, feature = "test-trace"))]

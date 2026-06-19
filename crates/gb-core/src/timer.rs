@@ -21,6 +21,7 @@ pub struct Timer {
     tma: u8,
     tac: u8,
     overflow_delay: Option<u8>,
+    reload_tma_latch: Option<u8>,
 }
 
 /// Timer state captured alongside a test-only bus-cycle trace record.
@@ -41,6 +42,7 @@ impl Timer {
             tma: 0,
             tac: 0,
             overflow_delay: None,
+            reload_tma_latch: None,
         }
     }
 
@@ -88,6 +90,19 @@ impl Timer {
         }
     }
 
+    /// Captures TMA at the start of a CPU machine cycle.
+    ///
+    /// A TMA write in the M-cycle where the reload transfer occurs updates
+    /// TMA, but the transfer itself still uses this latched old value.
+    pub(crate) fn begin_cpu_mcycle(&mut self) {
+        self.reload_tma_latch = Some(self.tma);
+    }
+
+    /// Ends the current CPU machine cycle's TMA reload latch.
+    pub(crate) fn end_cpu_mcycle(&mut self) {
+        self.reload_tma_latch = None;
+    }
+
     /// Returns the divider phase used to align the DMG internal serial clock.
     #[must_use]
     pub(crate) fn serial_clock_phase(&self) -> u16 {
@@ -107,7 +122,7 @@ impl Timer {
     fn tick_overflow_delay(&mut self, interrupts: &mut InterruptFlags) {
         if let Some(delay) = self.overflow_delay {
             if delay == 1 {
-                self.tima = self.tma;
+                self.tima = self.reload_tma_latch.unwrap_or(self.tma);
                 self.overflow_delay = None;
                 interrupts.request(Interrupt::Timer);
             } else {
@@ -381,6 +396,33 @@ mod tests {
             interrupts.raw(),
             0x04,
             "the reload-cycle TMA write must not suppress Timer IF"
+        );
+    }
+
+    #[test]
+    fn cpu_mcycle_tma_write_on_reload_uses_the_prewrite_tma_latch() {
+        let mut timer = Timer::new();
+        let mut interrupts = InterruptFlags::default();
+        timer.write(0xFF05, 0xFF);
+        timer.write(0xFF06, 0x42);
+        timer.write(0xFF07, 0x05);
+
+        timer.tick(TCycles(16), &mut interrupts);
+        timer.tick(TCycles(3), &mut interrupts);
+        timer.begin_cpu_mcycle();
+        timer.write(0xFF06, 0x77);
+        timer.tick(TCycles(1), &mut interrupts);
+        timer.end_cpu_mcycle();
+
+        assert_eq!(
+            timer.read(0xFF05),
+            0x42,
+            "a same-M-cycle TMA write must not replace the value already latched for TIMA reload"
+        );
+        assert_eq!(
+            timer.read(0xFF06),
+            0x77,
+            "the TMA register should still update"
         );
     }
 }

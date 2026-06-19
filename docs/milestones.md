@@ -24,6 +24,8 @@ with timed, interrupt-producing DMG transfers.
   divider-phase alignment.
 - Added explicit regression coverage that a TMA write on the TIMA reload cycle
   supplies the reload value while Timer IF is still requested.
+- Latched TMA at each CPU M-cycle boundary so a same-M-cycle TMA write updates
+  the register but cannot replace the value already selected for TIMA reload.
 
 ### Tests
 
@@ -42,6 +44,8 @@ with timed, interrupt-producing DMG transfers.
   is a test observer rather than an immediate transfer side effect.
 - The timer's current reload-window state model remains in place because the
   failing write ROMs require finer CPU write-versus-reload sub-cycle ordering.
+- The TMA reload latch follows the documented same-M-cycle rule; it is a
+  hardware model improvement independent of the remaining gate failures.
 - Added no dependencies.
 
 ### Notes

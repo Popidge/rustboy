@@ -101,6 +101,41 @@ pub struct BusCycleRecord {
     pub state: BusTraceState,
 }
 
+/// One component position in the Bus-owned T-cycle dispatcher.
+///
+/// A single DMG T-cycle advances these components in this fixed order. Keeping
+/// the order here makes timing changes reviewable instead of letting component
+/// calls leak into CPU execution paths.
+#[cfg(any(test, feature = "test-trace"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BusDispatchStage {
+    Timer,
+    Ppu,
+    Apu,
+    OamDma,
+}
+
+#[cfg(not(any(test, feature = "test-trace")))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BusDispatchStage {
+    Timer,
+    Ppu,
+    Apu,
+    OamDma,
+}
+
+/// A test-only record of one component invocation within a Bus T-cycle.
+///
+/// The snapshot is captured immediately after `stage` advances. Four records
+/// with the same `tcycle` therefore describe the complete dispatcher order.
+#[cfg(any(test, feature = "test-trace"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BusTcycleRecord {
+    pub tcycle: u64,
+    pub stage: BusDispatchStage,
+    pub state: BusTraceState,
+}
+
 /// CPU-facing memory bus.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Bus {
@@ -119,6 +154,8 @@ pub struct Bus {
     elapsed_tcycles: u64,
     #[cfg(any(test, feature = "test-trace"))]
     cycle_trace: Vec<BusCycleRecord>,
+    #[cfg(any(test, feature = "test-trace"))]
+    tcycle_trace: Vec<BusTcycleRecord>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -187,6 +224,8 @@ impl Bus {
             elapsed_tcycles: 0,
             #[cfg(any(test, feature = "test-trace"))]
             cycle_trace: Vec::new(),
+            #[cfg(any(test, feature = "test-trace"))]
+            tcycle_trace: Vec::new(),
         }
     }
 
@@ -261,12 +300,15 @@ impl Bus {
     }
 
     /// Advances bus-owned hardware components by the given T-cycles.
+    ///
+    /// Every iteration is one DMG T-cycle. Hardware advances in timer, PPU,
+    /// APU, then OAM-DMA order; interrupt requests raised by an earlier stage
+    /// are visible to the stages that follow. CPU code reaches this dispatcher
+    /// only through the clocked CPU bus helpers below.
     pub fn tick(&mut self, cycles: TCycles) {
-        self.timer.tick(cycles, &mut self.interrupt_flags);
-        self.ppu.tick(cycles, &mut self.interrupt_flags);
-        self.apu.tick(cycles);
-        self.tick_oam_dma(cycles);
-        self.elapsed_tcycles += u64::from(cycles.0);
+        for _ in 0..cycles.0 {
+            self.tick_tcycle();
+        }
     }
 
     /// Starts accounting for CPU bus cycles during one logical CPU step.
@@ -314,6 +356,22 @@ impl Bus {
         self.clocked_cpu_cycles.0 += CPU_MACHINE_CYCLE.0;
     }
 
+    fn tick_tcycle(&mut self) {
+        self.timer.tick(TCycles(1), &mut self.interrupt_flags);
+        self.record_tcycle_stage(BusDispatchStage::Timer);
+
+        self.ppu.tick(TCycles(1), &mut self.interrupt_flags);
+        self.record_tcycle_stage(BusDispatchStage::Ppu);
+
+        self.apu.tick(TCycles(1));
+        self.record_tcycle_stage(BusDispatchStage::Apu);
+
+        self.tick_oam_dma(TCycles(1));
+        self.record_tcycle_stage(BusDispatchStage::OamDma);
+
+        self.elapsed_tcycles += 1;
+    }
+
     /// Returns the accumulated test-only CPU bus-cycle trace without draining it.
     #[cfg(any(test, feature = "test-trace"))]
     #[must_use]
@@ -325,6 +383,19 @@ impl Bus {
     #[cfg(any(test, feature = "test-trace"))]
     pub fn take_cycle_trace(&mut self) -> Vec<BusCycleRecord> {
         std::mem::take(&mut self.cycle_trace)
+    }
+
+    /// Returns the test-only one-T-cycle dispatcher trace without draining it.
+    #[cfg(any(test, feature = "test-trace"))]
+    #[must_use]
+    pub fn tcycle_trace(&self) -> &[BusTcycleRecord] {
+        &self.tcycle_trace
+    }
+
+    /// Drains the test-only one-T-cycle dispatcher trace.
+    #[cfg(any(test, feature = "test-trace"))]
+    pub fn take_tcycle_trace(&mut self) -> Vec<BusTcycleRecord> {
+        std::mem::take(&mut self.tcycle_trace)
     }
 
     #[must_use]
@@ -406,31 +477,48 @@ impl Bus {
 
     #[cfg(any(test, feature = "test-trace"))]
     fn record_cycle(&mut self, kind: BusCycleKind, address: Option<u16>, value: Option<u8>) {
-        let (ppu_ly, ppu_mode) = self.ppu.trace_ly_and_mode();
-        let timer = self.timer.trace_state();
-
         self.cycle_trace.push(BusCycleRecord {
             tcycle: self.elapsed_tcycles,
             kind,
             address,
             value,
-            state: BusTraceState {
-                ppu_ly,
-                ppu_mode,
-                interrupt_flags: self.interrupt_flags.raw(),
-                interrupt_enable: self.interrupt_enable.raw(),
-                timer_tima: timer.tima,
-                timer_tma: timer.tma,
-                timer_overflow_delay: timer.overflow_delay,
-                dma_active: self.oam_dma.is_active(),
-                dma_next_byte: self.oam_dma.next_byte,
-                dma_startup_mcycles: self.oam_dma.startup_mcycles,
-            },
+            state: self.trace_state(),
         });
     }
 
     #[cfg(not(any(test, feature = "test-trace")))]
     fn record_cycle(&mut self, _kind: BusCycleKind, _address: Option<u16>, _value: Option<u8>) {}
+
+    #[cfg(any(test, feature = "test-trace"))]
+    fn record_tcycle_stage(&mut self, stage: BusDispatchStage) {
+        self.tcycle_trace.push(BusTcycleRecord {
+            tcycle: self.elapsed_tcycles,
+            stage,
+            state: self.trace_state(),
+        });
+    }
+
+    #[cfg(not(any(test, feature = "test-trace")))]
+    fn record_tcycle_stage(&mut self, _stage: BusDispatchStage) {}
+
+    #[cfg(any(test, feature = "test-trace"))]
+    fn trace_state(&self) -> BusTraceState {
+        let (ppu_ly, ppu_mode) = self.ppu.trace_ly_and_mode();
+        let timer = self.timer.trace_state();
+
+        BusTraceState {
+            ppu_ly,
+            ppu_mode,
+            interrupt_flags: self.interrupt_flags.raw(),
+            interrupt_enable: self.interrupt_enable.raw(),
+            timer_tima: timer.tima,
+            timer_tma: timer.tma,
+            timer_overflow_delay: timer.overflow_delay,
+            dma_active: self.oam_dma.is_active(),
+            dma_next_byte: self.oam_dma.next_byte,
+            dma_startup_mcycles: self.oam_dma.startup_mcycles,
+        }
+    }
 
     /// Returns the highest-priority interrupt that is both enabled and requested.
     #[must_use]
@@ -503,7 +591,7 @@ fn hram_index(address: u16) -> usize {
 
 #[cfg(test)]
 mod tests {
-    use super::{Bus, BusCycleKind};
+    use super::{Bus, BusCycleKind, BusDispatchStage};
     use crate::{cartridge::Cartridge, cpu::TCycles, ppu::PpuMode};
 
     fn test_bus() -> Bus {
@@ -583,5 +671,46 @@ mod tests {
         assert_eq!(trace[0].kind, BusCycleKind::Read);
         assert_eq!(trace[0].address, Some(0xC000));
         assert_eq!(trace[0].value, Some(0));
+    }
+
+    #[test]
+    fn cpu_machine_cycle_dispatches_each_tcycle_in_bus_order() {
+        let mut bus = test_bus();
+
+        bus.cpu_idle_mcycle();
+
+        let trace = bus.take_tcycle_trace();
+        assert_eq!(
+            trace.len(),
+            16,
+            "one CPU machine cycle should expose four T-cycles and four Bus stages each"
+        );
+        assert_eq!(
+            trace.iter().map(|record| record.tcycle).collect::<Vec<_>>(),
+            vec![0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3],
+            "the dispatcher should retain the monotonic T-cycle boundary for every stage"
+        );
+        assert_eq!(
+            trace.iter().map(|record| record.stage).collect::<Vec<_>>(),
+            vec![
+                BusDispatchStage::Timer,
+                BusDispatchStage::Ppu,
+                BusDispatchStage::Apu,
+                BusDispatchStage::OamDma,
+                BusDispatchStage::Timer,
+                BusDispatchStage::Ppu,
+                BusDispatchStage::Apu,
+                BusDispatchStage::OamDma,
+                BusDispatchStage::Timer,
+                BusDispatchStage::Ppu,
+                BusDispatchStage::Apu,
+                BusDispatchStage::OamDma,
+                BusDispatchStage::Timer,
+                BusDispatchStage::Ppu,
+                BusDispatchStage::Apu,
+                BusDispatchStage::OamDma,
+            ],
+            "each T-cycle should dispatch timer, PPU, APU, then OAM DMA"
+        );
     }
 }

@@ -3773,10 +3773,8 @@ mod tests {
         let mut cpu = Cpu::new_dmg_post_boot();
 
         for _ in 0..8 {
-            let cycles = cpu
-                .step(&mut bus)
+            cpu.step(&mut bus)
                 .expect("serial test ROM opcodes should run");
-            bus.tick(cycles);
         }
 
         assert_eq!(

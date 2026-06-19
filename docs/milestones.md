@@ -1,5 +1,50 @@
 # Milestones
 
+## 0049: Install the one-T-cycle Bus dispatcher
+
+Date: 2026-06-19
+
+Status: Complete
+
+### Goal
+
+Give all timing-active Bus-owned hardware a shared, monotonic DMG T-cycle
+timebase while retaining the public instruction-step API.
+
+### Changes
+
+- Replaced bulk component ticking with a documented `Bus` dispatcher that
+  advances one T-cycle at a time in timer, PPU, APU, then OAM-DMA order.
+- Kept CPU fetch, read, write, and idle M-cycle helpers as the sole CPU path
+  into Bus timing.
+- Removed the remaining CPU-module test-side whole-instruction `Bus::tick`
+  call so CPU code no longer advances hardware outside those helpers.
+- Extended the opt-in trace API with dispatcher-stage records and added a test
+  proving all four T-cycles of one CPU M-cycle are observable in Bus order.
+
+### Tests
+
+- `cargo fmt`
+- `cargo test` (208 passed)
+- `cargo test -p gb-core --features test-trace` (178 passed)
+- `cargo clippy --all-targets --all-features`
+- Gates passed: Blargg `instr_timing` and `mem_timing` (one ROM each, serial
+  text result, 60-second per-case timeout).
+
+### Decisions
+
+- The dispatcher deliberately uses explicit per-T-cycle calls rather than an
+  event scheduler so its ordering remains inspectable.
+- Existing machine-cycle traces remain available; the new dispatcher trace is
+  test-only or enabled by the dependency-free `test-trace` feature.
+- Added no dependencies and changed no CPU, Bus, or component ownership rule.
+
+### Notes
+
+- Smart App Control initially blocked Cargo from loading the generated unsigned
+  `serde_derive` proc-macro DLL. Once it was disabled, the runner built and
+  both gates passed.
+
 ## 0048: Establish an accuracy baseline and trace language
 
 Date: 2026-06-19

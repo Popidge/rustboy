@@ -88,6 +88,12 @@ impl Timer {
         }
     }
 
+    /// Returns the divider phase used to align the DMG internal serial clock.
+    #[must_use]
+    pub(crate) fn serial_clock_phase(&self) -> u16 {
+        self.div_counter & 0x00FF
+    }
+
     #[cfg(any(test, feature = "test-trace"))]
     #[must_use]
     pub(crate) fn trace_state(&self) -> TimerTraceState {
@@ -350,6 +356,31 @@ mod tests {
             interrupts.raw(),
             0x04,
             "reload should request the Timer interrupt"
+        );
+    }
+
+    #[test]
+    fn tma_write_on_reload_cycle_updates_the_reloaded_tima_value() {
+        let mut timer = Timer::new();
+        let mut interrupts = InterruptFlags::default();
+        timer.write(0xFF05, 0xFF);
+        timer.write(0xFF06, 0x42);
+        timer.write(0xFF07, 0x05);
+
+        timer.tick(TCycles(16), &mut interrupts);
+        timer.tick(TCycles(3), &mut interrupts);
+        timer.write(0xFF06, 0x77);
+        timer.tick(TCycles(1), &mut interrupts);
+
+        assert_eq!(
+            timer.read(0xFF05),
+            0x77,
+            "a TMA write on the reload cycle should supply the TIMA reload value"
+        );
+        assert_eq!(
+            interrupts.raw(),
+            0x04,
+            "the reload-cycle TMA write must not suppress Timer IF"
         );
     }
 }

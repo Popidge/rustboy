@@ -113,6 +113,7 @@ pub enum BusDispatchStage {
     Ppu,
     Apu,
     OamDma,
+    Serial,
 }
 
 #[cfg(not(any(test, feature = "test-trace")))]
@@ -122,11 +123,12 @@ enum BusDispatchStage {
     Ppu,
     Apu,
     OamDma,
+    Serial,
 }
 
 /// A test-only record of one component invocation within a Bus T-cycle.
 ///
-/// The snapshot is captured immediately after `stage` advances. Four records
+/// The snapshot is captured immediately after `stage` advances. Five records
 /// with the same `tcycle` therefore describe the complete dispatcher order.
 #[cfg(any(test, feature = "test-trace"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -272,7 +274,10 @@ impl Bus {
             OAM_START..=OAM_END => self.ppu.write_oam(address - OAM_START, value),
             UNUSABLE_OAM_START..=UNUSABLE_OAM_END => {}
             JOYPAD_ADDR => self.joypad.write(value),
-            SERIAL_START..=SERIAL_END => self.serial.write(address, value),
+            SERIAL_START..=SERIAL_END => {
+                self.serial
+                    .write_with_clock_phase(address, value, self.timer.serial_clock_phase());
+            }
             TIMER_START..=TIMER_END => self.timer.write(address, value),
             INTERRUPT_FLAGS_ADDR => self.interrupt_flags.write_if(value),
             0xFF10..=0xFF3F => self.apu.write(address, value),
@@ -304,9 +309,9 @@ impl Bus {
     /// Advances bus-owned hardware components by the given T-cycles.
     ///
     /// Every iteration is one DMG T-cycle. Hardware advances in timer, PPU,
-    /// APU, then OAM-DMA order; interrupt requests raised by an earlier stage
-    /// are visible to the stages that follow. CPU code reaches this dispatcher
-    /// only through the clocked CPU bus helpers below.
+    /// APU, OAM-DMA, then Serial order; interrupt requests raised by an earlier
+    /// stage are visible to the stages that follow. CPU code reaches this
+    /// dispatcher only through the clocked CPU bus helpers below.
     pub fn tick(&mut self, cycles: TCycles) {
         for _ in 0..cycles.0 {
             self.tick_tcycle();
@@ -370,6 +375,9 @@ impl Bus {
 
         self.tick_oam_dma(TCycles(1));
         self.record_tcycle_stage(BusDispatchStage::OamDma);
+
+        self.serial.tick(TCycles(1), &mut self.interrupt_flags);
+        self.record_tcycle_stage(BusDispatchStage::Serial);
 
         self.elapsed_tcycles += 1;
     }
@@ -699,12 +707,12 @@ mod tests {
         let trace = bus.take_tcycle_trace();
         assert_eq!(
             trace.len(),
-            16,
-            "one CPU machine cycle should expose four T-cycles and four Bus stages each"
+            20,
+            "one CPU machine cycle should expose four T-cycles and five Bus stages each"
         );
         assert_eq!(
             trace.iter().map(|record| record.tcycle).collect::<Vec<_>>(),
-            vec![0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3],
+            vec![0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 2, 2, 2, 2, 2, 3, 3, 3, 3, 3],
             "the dispatcher should retain the monotonic T-cycle boundary for every stage"
         );
         assert_eq!(
@@ -714,20 +722,24 @@ mod tests {
                 BusDispatchStage::Ppu,
                 BusDispatchStage::Apu,
                 BusDispatchStage::OamDma,
+                BusDispatchStage::Serial,
                 BusDispatchStage::Timer,
                 BusDispatchStage::Ppu,
                 BusDispatchStage::Apu,
                 BusDispatchStage::OamDma,
+                BusDispatchStage::Serial,
                 BusDispatchStage::Timer,
                 BusDispatchStage::Ppu,
                 BusDispatchStage::Apu,
                 BusDispatchStage::OamDma,
+                BusDispatchStage::Serial,
                 BusDispatchStage::Timer,
                 BusDispatchStage::Ppu,
                 BusDispatchStage::Apu,
                 BusDispatchStage::OamDma,
+                BusDispatchStage::Serial,
             ],
-            "each T-cycle should dispatch timer, PPU, APU, then OAM DMA"
+            "each T-cycle should dispatch timer, PPU, APU, OAM DMA, then Serial"
         );
     }
 }

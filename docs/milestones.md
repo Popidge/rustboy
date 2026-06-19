@@ -1,5 +1,56 @@
 # Milestones
 
+## 0052: Finish timer reload ordering and model serial transfer time
+
+Date: 2026-06-19
+
+Status: Partial
+
+### Goal
+
+Finish timer reload-window ordering and replace immediate debug serial capture
+with timed, interrupt-producing DMG transfers.
+
+### Changes
+
+- Added a Bus-dispatched serial engine: internal-clock transfers shift one bit
+  per 512 T-cycles, complete after eight bits, clear SC start, shift `0xFF`
+  into SB, request Serial IF, and then expose the completed outgoing byte to
+  headless observers.
+- Kept external-clock transfers active until a future link-clock source exists,
+  and made a new SC start restart the in-progress transfer.
+- Aligned internal serial completion to the low-byte divider phase supplied by
+  Timer and added Bus/serial tests for timing, IF, restart, external clock, and
+  divider-phase alignment.
+- Added explicit regression coverage that a TMA write on the TIMA reload cycle
+  supplies the reload value while Timer IF is still requested.
+
+### Tests
+
+- `cargo fmt`
+- `cargo test` (214 passed)
+- `cargo clippy --all-targets --all-features`
+- Gate passed: Mooneye `timer/tima_reload` (breakpoint-register result,
+  20-second timeout).
+- Gates failed: Mooneye `timer/tima_write_reloading`,
+  `timer/tma_write_reloading`, and `serial/boot_sclk_align-dmgABCmgb` (all
+  terminate with the failure signature `B=C=D=E=H=L=0x66`).
+
+### Decisions
+
+- Serial timing and IF requests remain Bus-dispatched; completed-byte capture
+  is a test observer rather than an immediate transfer side effect.
+- The timer's current reload-window state model remains in place because the
+  failing write ROMs require finer CPU write-versus-reload sub-cycle ordering.
+- Added no dependencies.
+
+### Notes
+
+- The serial boot-clock gate also depends on reset/boot divider alignment, so
+  it remains diagnostic until the later optional boot-ROM/reset milestone.
+- Next step: expose timer reload phase and CPU write timing within a machine
+  cycle, then use a short trace to distinguish the two write-reloading ROMs.
+
 ## 0051: Complete DMG OAM-DMA arbitration
 
 Date: 2026-06-19

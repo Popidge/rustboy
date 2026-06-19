@@ -204,14 +204,25 @@ fn serial_registers_are_routed_and_output_can_be_drained() {
 
     bus.write8(0xFF01, b'O');
     bus.write8(0xFF02, 0x81);
+    bus.tick(TCycles(4_096));
     bus.write8(0xFF01, b'K');
     bus.write8(0xFF02, 0x81);
+    bus.tick(TCycles(4_096));
 
-    assert_eq!(bus.read8(0xFF01), b'K', "SB should keep the latest byte");
+    assert_eq!(
+        bus.read8(0xFF01),
+        0xFF,
+        "a completed disconnected transfer should shift ones into SB"
+    );
+    assert_eq!(
+        bus.interrupt_flags() & Interrupt::Serial.mask(),
+        Interrupt::Serial.mask(),
+        "a completed transfer should request the Serial interrupt"
+    );
     assert_eq!(
         bus.serial_output(),
         b"OK",
-        "SC transfer starts should expose serial output"
+        "completed internal-clock transfers should expose serial output"
     );
     assert_eq!(
         bus.take_serial_output(),
@@ -221,6 +232,27 @@ fn serial_registers_are_routed_and_output_can_be_drained() {
     assert!(
         bus.serial_output().is_empty(),
         "take_serial_output should drain the buffer"
+    );
+}
+
+#[test]
+fn internal_serial_transfer_is_aligned_to_the_divider_phase() {
+    let mut bus = test_bus_with_rom_byte(0x0100, 0x42);
+
+    bus.tick(TCycles(7));
+    bus.write8(0xFF01, b'A');
+    bus.write8(0xFF02, 0x81);
+    bus.tick(TCycles(4_088));
+
+    assert!(
+        bus.serial_output().is_empty(),
+        "a divider phase of seven should complete one T-cycle after 4,088 ticks"
+    );
+    bus.tick(TCycles(1));
+    assert_eq!(
+        bus.serial_output(),
+        b"A",
+        "serial completion should follow the Bus timer divider phase"
     );
 }
 

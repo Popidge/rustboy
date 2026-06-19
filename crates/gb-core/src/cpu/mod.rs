@@ -3862,10 +3862,17 @@ mod tests {
         ]);
         let mut cpu = Cpu::new_dmg_post_boot();
 
-        for _ in 0..8 {
+        for _ in 0..4 {
             cpu.step(&mut bus)
                 .expect("serial test ROM opcodes should run");
         }
+        bus.tick(TCycles(4_096));
+
+        for _ in 0..4 {
+            cpu.step(&mut bus)
+                .expect("serial test ROM opcodes should run");
+        }
+        bus.tick(TCycles(4_096));
 
         assert_eq!(
             bus.take_serial_output(),

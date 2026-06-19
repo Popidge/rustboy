@@ -1972,6 +1972,39 @@ Add a test-only helper for constructing a minimal 32 KiB ROM image with configur
 - This helper is ready for future CPU, bus, and cartridge tests that need minimal ROM bytes at `0x0100`.
 # Milestones
 
+## 0055: Replace fixed mode 3 with a DMG fetcher/FIFO pipeline
+
+Date: 2026-06-19
+
+Status: Complete
+
+### Goal
+
+Produce LCD pixels while mode 3 runs so transfer length and visible register effects arise from pipeline state.
+
+### Changes
+
+- Replaced end-of-scanline rendering and the fixed mode-3 constant with a dot-driven background/window fetcher and fixed pixel FIFO.
+- Added SCX pixel discard, window activation, per-line window accounting, selected-sprite fetch stalls, and per-pixel sprite composition.
+- Made mode 3 end only after all 160 pixels are committed; completed pixels retain their earlier palette result.
+
+### Tests
+
+- `cargo fmt`
+- `cargo test`
+- `cargo clippy --all-targets --all-features`
+- Added focused PPU tests for variable mode-3 length and mid-transfer palette effects.
+- AGE/window, Mealybug, GBMicrotest, and DMG Acid 2 were not locally available.
+
+### Decisions
+
+- The compact FIFO uses a fixed 16-pixel array; it introduces no runtime allocation or dependency.
+- Sprite stall time is presently charged from the selected ten-sprite line set. Exact per-sprite fetch placement remains a known refinement rather than a compatibility patch.
+
+### Notes
+
+- Mode-3 timing now emerges from FIFO output, SCX discard, and sprite work; further PPU tests should refine fetch/stall dot placement against the named external gates.
+
 ## 0054: Make PPU mode, LCD, STAT, and memory access rules accurate
 
 Date: 2026-06-19

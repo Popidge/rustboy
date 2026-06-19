@@ -32,7 +32,7 @@ const DOTS_PER_LINE: u32 = 456;
 const VISIBLE_LINES: u8 = 144;
 const LINES_PER_FRAME: u8 = 154;
 const OAM_DOTS: u32 = 80;
-const TRANSFER_DOTS: u32 = 172;
+const FETCHER_STARTUP_DOTS: u32 = 6;
 
 const DMG_SHADES: [u32; 4] = [0xFFFF_FFFF, 0xFFAA_AAAA, 0xFF55_5555, 0xFF00_0000];
 
@@ -56,6 +56,11 @@ pub struct Ppu {
     stat_interrupt_active: bool,
     window_y_triggered: bool,
     window_line: u8,
+    fetcher: BackgroundFetcher,
+    transfer_dots: u32,
+    pixel_x: usize,
+    scx_discard: u8,
+    sprite_fetch_stall: u8,
     framebuffer: [u32; FRAMEBUFFER_PIXELS],
     frame_ready: bool,
 }
@@ -86,6 +91,11 @@ impl Ppu {
             stat_interrupt_active: false,
             window_y_triggered: false,
             window_line: 0,
+            fetcher: BackgroundFetcher::new(),
+            transfer_dots: 0,
+            pixel_x: 0,
+            scx_discard: 0,
+            sprite_fetch_stall: 0,
             framebuffer: [DMG_SHADES[0]; FRAMEBUFFER_PIXELS],
             frame_ready: false,
         }
@@ -176,6 +186,9 @@ impl Ppu {
             }
 
             self.line_dots += 1;
+            if self.mode == PpuMode::PixelTransfer {
+                self.tick_pixel_transfer();
+            }
             self.update_mode(interrupts);
 
             if self.line_dots >= DOTS_PER_LINE {
@@ -225,10 +238,6 @@ impl Ppu {
     }
 
     fn finish_scanline(&mut self, interrupts: &mut InterruptFlags) {
-        if self.ly < VISIBLE_LINES {
-            self.render_scanline(self.ly);
-        }
-
         self.line_dots -= DOTS_PER_LINE;
         self.ly = self.ly.wrapping_add(1);
 
@@ -243,6 +252,7 @@ impl Ppu {
             self.window_y_triggered = false;
             self.window_line = 0;
             self.frame_ready = false;
+            self.reset_transfer();
             self.update_stat_interrupt(interrupts);
         } else {
             self.update_mode(interrupts);
@@ -277,7 +287,10 @@ impl Ppu {
             PpuMode::VBlank
         } else if self.line_dots < OAM_DOTS {
             PpuMode::OamSearch
-        } else if self.line_dots < OAM_DOTS + TRANSFER_DOTS {
+        } else if self.mode == PpuMode::PixelTransfer && self.pixel_x < SCREEN_WIDTH {
+            PpuMode::PixelTransfer
+        } else if self.line_dots == OAM_DOTS {
+            self.begin_pixel_transfer();
             PpuMode::PixelTransfer
         } else {
             PpuMode::HBlank
@@ -311,6 +324,156 @@ impl Ppu {
         };
 
         lyc_signal || mode_signal
+    }
+
+    fn begin_pixel_transfer(&mut self) {
+        if self.lcdc.window_enabled() && self.ly == self.wy {
+            self.window_y_triggered = true;
+        }
+
+        self.reset_transfer();
+        self.scx_discard = self.scx & 0x07;
+        self.sprite_fetch_stall = self.visible_sprite_count().saturating_mul(6);
+    }
+
+    fn reset_transfer(&mut self) {
+        self.fetcher = BackgroundFetcher::new();
+        self.transfer_dots = 0;
+        self.pixel_x = 0;
+        self.scx_discard = 0;
+        self.sprite_fetch_stall = 0;
+    }
+
+    fn tick_pixel_transfer(&mut self) {
+        self.transfer_dots += 1;
+        if self.transfer_dots <= FETCHER_STARTUP_DOTS {
+            return;
+        }
+
+        // Sprite fetches pause background output. The compact model accounts
+        // for the six-dot fetch cost of every selected sprite; later work can
+        // refine the exact x-position of each stall without changing the FIFO
+        // ownership or mode-3 termination rule.
+        if self.sprite_fetch_stall > 0 {
+            self.sprite_fetch_stall -= 1;
+            return;
+        }
+
+        self.fetcher.tick(
+            &self.vram,
+            self.lcdc,
+            self.scx,
+            self.scy,
+            self.ly,
+            self.window_y_triggered,
+            self.window_line,
+            self.wx,
+            self.pixel_x,
+        );
+
+        let Some(color_index) = self.fetcher.pop_pixel() else {
+            return;
+        };
+
+        if self.scx_discard > 0 {
+            self.scx_discard -= 1;
+            return;
+        }
+
+        let color = self.sprite_color_at(self.pixel_x, color_index).map_or_else(
+            || self.map_background_color(color_index),
+            |(sprite_color, palette)| self.map_object_color(sprite_color, palette),
+        );
+        self.framebuffer[usize::from(self.ly) * SCREEN_WIDTH + self.pixel_x] = color;
+        self.pixel_x += 1;
+
+        if self.pixel_x == SCREEN_WIDTH && self.fetcher.used_window() {
+            self.window_line = self.window_line.wrapping_add(1);
+        }
+    }
+
+    fn visible_sprite_count(&self) -> u8 {
+        if !self.lcdc.sprites_enabled() {
+            return 0;
+        }
+
+        let sprite_height = i16::from(self.lcdc.sprite_height());
+        let line = i16::from(self.ly);
+        let mut count = 0;
+        for sprite_index in 0..40 {
+            let y = i16::from(self.oam[sprite_index * 4]) - 16;
+            if (y..y + sprite_height).contains(&line) {
+                count += 1;
+                if count == 10 {
+                    break;
+                }
+            }
+        }
+        count
+    }
+
+    fn sprite_color_at(
+        &self,
+        screen_x: usize,
+        background_color: u8,
+    ) -> Option<(u8, ObjectPalette)> {
+        if !self.lcdc.sprites_enabled() {
+            return None;
+        }
+
+        let line = i16::from(self.ly);
+        let screen_x = i16::try_from(screen_x).expect("screen width fits in i16");
+        let sprite_height = self.lcdc.sprite_height();
+        let mut selected = Vec::with_capacity(10);
+
+        for index in 0..40 {
+            let sprite = OamEntry::from_oam(&self.oam[index * 4..index * 4 + 4]);
+            let sprite_y = i16::from(sprite.y) - 16;
+            if (sprite_y..sprite_y + i16::from(sprite_height)).contains(&line) {
+                selected.push((index, sprite));
+                if selected.len() == 10 {
+                    break;
+                }
+            }
+        }
+
+        selected.sort_by(|(left_index, left), (right_index, right)| {
+            left.x
+                .cmp(&right.x)
+                .then_with(|| left_index.cmp(right_index))
+        });
+
+        for (_, sprite) in selected {
+            let sprite_x = i16::from(sprite.x) - 8;
+            if !(sprite_x..sprite_x + 8).contains(&screen_x)
+                || (sprite.bg_priority && background_color != 0)
+            {
+                continue;
+            }
+
+            let row_in_sprite = usize::try_from(line - (i16::from(sprite.y) - 16))
+                .expect("selected sprite covers the current line");
+            let tile_row = if sprite.y_flip {
+                usize::from(sprite_height) - 1 - row_in_sprite
+            } else {
+                row_in_sprite
+            };
+            let tile_number = if sprite_height == 16 {
+                sprite.tile_index & 0xFE
+            } else {
+                sprite.tile_index
+            }
+            .wrapping_add(u8::try_from(tile_row / 8).expect("sprite row bank fits in u8"));
+            let tile_offset = usize::from(tile_number) * 16 + (tile_row % 8) * 2;
+            let pixels = decode_tile_row(self.vram[tile_offset], self.vram[tile_offset + 1]);
+            let column = usize::try_from(screen_x - sprite_x).expect("sprite covers pixel");
+            let color = pixels[if sprite.x_flip { 7 - column } else { column }];
+            if color != 0 {
+                return Some((color, sprite.palette));
+            }
+        }
+
+        None
     }
 
     fn render_scanline(&mut self, line: u8) {
@@ -515,6 +678,127 @@ impl PpuMode {
             Self::OamSearch => 2,
             Self::PixelTransfer => 3,
         }
+    }
+}
+
+/// Background/window tile fetcher and its eight-pixel output FIFO.
+///
+/// The DMG fetcher obtains a tile number and its two row bytes in alternating
+/// dots, then places the decoded row into a fixed FIFO. Keeping this state
+/// separate from the framebuffer makes mode 3 end when pixels are actually
+/// produced, rather than at a precomputed dot count.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct BackgroundFetcher {
+    fifo: [u8; 16],
+    fifo_head: usize,
+    fifo_len: usize,
+    fetch_phase: u8,
+    phase_dots: u8,
+    tile_number: u8,
+    low: u8,
+    tile_x: u8,
+    using_window: bool,
+}
+
+impl BackgroundFetcher {
+    const fn new() -> Self {
+        Self {
+            fifo: [0; 16],
+            fifo_head: 0,
+            fifo_len: 0,
+            fetch_phase: 0,
+            phase_dots: 0,
+            tile_number: 0,
+            low: 0,
+            tile_x: 0,
+            using_window: false,
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn tick(
+        &mut self,
+        vram: &[u8; VRAM_SIZE],
+        lcdc: Lcdc,
+        scx: u8,
+        scy: u8,
+        ly: u8,
+        window_y_triggered: bool,
+        window_line: u8,
+        wx: u8,
+        pixel_x: usize,
+    ) {
+        let window_left = i16::from(wx) - 7;
+        if !self.using_window
+            && window_y_triggered
+            && i16::try_from(pixel_x).unwrap_or(i16::MAX) >= window_left
+        {
+            self.using_window = true;
+            self.tile_x = 0;
+            self.fifo_head = 0;
+            self.fifo_len = 0;
+            self.fetch_phase = 0;
+            self.phase_dots = 0;
+        }
+
+        self.phase_dots += 1;
+        if self.phase_dots < 2 {
+            return;
+        }
+        self.phase_dots = 0;
+
+        let (map_offset, tile_y, tile_x) = if self.using_window {
+            (lcdc.window_tile_map_offset(), window_line, self.tile_x)
+        } else {
+            (
+                lcdc.background_tile_map_offset(),
+                ly.wrapping_add(scy),
+                self.tile_x.wrapping_add(scx / 8),
+            )
+        };
+        let row = usize::from(tile_y & 7);
+
+        match self.fetch_phase {
+            0 => {
+                let map_index = usize::from(tile_y / 8) * 32 + usize::from(tile_x & 31);
+                self.tile_number = vram[map_offset + map_index];
+            }
+            1 => {
+                let offset = lcdc.tile_data_offset(self.tile_number) + row * 2;
+                self.low = vram[offset];
+            }
+            _ => {
+                let offset = lcdc.tile_data_offset(self.tile_number) + row * 2 + 1;
+                self.push_row(decode_tile_row(self.low, vram[offset]));
+                self.tile_x = self.tile_x.wrapping_add(1);
+            }
+        }
+        self.fetch_phase = (self.fetch_phase + 1) % 3;
+    }
+
+    fn push_row(&mut self, pixels: [u8; 8]) {
+        if self.fifo_len > 8 {
+            return;
+        }
+        for pixel in pixels {
+            let index = (self.fifo_head + self.fifo_len) % self.fifo.len();
+            self.fifo[index] = pixel;
+            self.fifo_len += 1;
+        }
+    }
+
+    fn pop_pixel(&mut self) -> Option<u8> {
+        if self.fifo_len == 0 {
+            return None;
+        }
+        let pixel = self.fifo[self.fifo_head];
+        self.fifo_head = (self.fifo_head + 1) % self.fifo.len();
+        self.fifo_len -= 1;
+        Some(pixel)
+    }
+
+    fn used_window(&self) -> bool {
+        self.using_window
     }
 }
 
@@ -1157,6 +1441,67 @@ mod tests {
             interrupts.raw() & 0x02,
             0,
             "enabling an already-high coincidence source must not create a second edge"
+        );
+    }
+
+    #[test]
+    fn pixel_transfer_length_grows_with_scx_discard_and_selected_sprites() {
+        let mut ppu = Ppu::new();
+        let mut interrupts = InterruptFlags::default();
+
+        ppu.write_register(0xFF43, 7);
+        ppu.tick(TCycles(80 + 172), &mut interrupts);
+        assert_eq!(
+            ppu.mode,
+            PpuMode::PixelTransfer,
+            "SCX discard should extend mode 3"
+        );
+
+        ppu.tick(TCycles(7), &mut interrupts);
+        assert_eq!(
+            ppu.mode,
+            PpuMode::HBlank,
+            "mode 3 should end after discarded pixels"
+        );
+
+        let mut sprite_ppu = Ppu::new();
+        sprite_ppu.write_register(0xFF40, 0x93);
+        sprite_ppu.write_oam(0, 16);
+        sprite_ppu.write_oam(1, 8);
+        sprite_ppu.tick(TCycles(80 + 172), &mut interrupts);
+        assert_eq!(
+            sprite_ppu.mode,
+            PpuMode::PixelTransfer,
+            "a selected sprite should add a fetch stall to mode 3"
+        );
+    }
+
+    #[test]
+    fn pixels_are_written_during_transfer_and_later_palette_writes_do_not_recolor_them() {
+        let mut ppu = Ppu::new();
+        let mut interrupts = InterruptFlags::default();
+        ppu.write_register(0xFF47, 0b1110_0100);
+        ppu.write_vram(0x0000, 0xFF);
+        ppu.write_vram(0x0001, 0x00);
+
+        ppu.tick(TCycles(100), &mut interrupts);
+        let first_pixel = ppu.framebuffer()[0];
+        assert_eq!(
+            first_pixel, DMG_SHADES[1],
+            "transfer should produce pixels before HBlank"
+        );
+
+        ppu.write_register(0xFF47, 0b1110_1000);
+        ppu.tick(TCycles(8), &mut interrupts);
+        assert_eq!(
+            ppu.framebuffer()[0],
+            first_pixel,
+            "already-output pixels are immutable"
+        );
+        assert_eq!(
+            ppu.framebuffer()[16],
+            DMG_SHADES[2],
+            "a palette write should affect pixels produced after the write"
         );
     }
 }

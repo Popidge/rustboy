@@ -60,6 +60,7 @@ pub struct Ppu {
     transfer_dots: u32,
     pixel_x: usize,
     scx_discard: u8,
+    selected_sprites: [Option<SelectedSprite>; 10],
     sprite_fetch_stall: u8,
     framebuffer: [u32; FRAMEBUFFER_PIXELS],
     frame_ready: bool,
@@ -95,6 +96,7 @@ impl Ppu {
             transfer_dots: 0,
             pixel_x: 0,
             scx_discard: 0,
+            selected_sprites: [None; 10],
             sprite_fetch_stall: 0,
             framebuffer: [DMG_SHADES[0]; FRAMEBUFFER_PIXELS],
             frame_ready: false,
@@ -333,7 +335,7 @@ impl Ppu {
 
         self.reset_transfer();
         self.scx_discard = self.scx & 0x07;
-        self.sprite_fetch_stall = self.visible_sprite_count().saturating_mul(6);
+        self.selected_sprites = self.select_sprites_for_line(self.ly);
     }
 
     fn reset_transfer(&mut self) {
@@ -341,6 +343,7 @@ impl Ppu {
         self.transfer_dots = 0;
         self.pixel_x = 0;
         self.scx_discard = 0;
+        self.selected_sprites = [None; 10];
         self.sprite_fetch_stall = 0;
     }
 
@@ -350,10 +353,12 @@ impl Ppu {
             return;
         }
 
-        // Sprite fetches pause background output. The compact model accounts
-        // for the six-dot fetch cost of every selected sprite; later work can
-        // refine the exact x-position of each stall without changing the FIFO
-        // ownership or mode-3 termination rule.
+        self.begin_due_sprite_fetch();
+
+        // Sprite fetches pause background output at the selected sprite's X
+        // position. Charging every fetch at the beginning of mode 3 shifted
+        // the entire scanline and made CPU-visible palette changes occur at
+        // the wrong pixels.
         if self.sprite_fetch_stall > 0 {
             self.sprite_fetch_stall -= 1;
             return;
@@ -371,7 +376,7 @@ impl Ppu {
             self.pixel_x,
         );
 
-        let Some(color_index) = self.fetcher.pop_pixel() else {
+        let Some(fetched_background_color) = self.fetcher.pop_pixel() else {
             return;
         };
 
@@ -380,10 +385,20 @@ impl Ppu {
             return;
         }
 
-        let color = self.sprite_color_at(self.pixel_x, color_index).map_or_else(
-            || self.map_background_color(color_index),
-            |(sprite_color, palette)| self.map_object_color(sprite_color, palette),
-        );
+        // LCDC bit 0 hides the background/window layer on DMG. The fetcher
+        // can still contain tile pixels, but sprite priority must see colour
+        // zero when that layer is disabled.
+        let background_color = if self.lcdc.background_enabled() {
+            fetched_background_color
+        } else {
+            0
+        };
+        let color = self
+            .sprite_color_at(self.pixel_x, background_color)
+            .map_or_else(
+                || self.map_background_color(background_color),
+                |(sprite_color, palette)| self.map_object_color(sprite_color, palette),
+            );
         self.framebuffer[usize::from(self.ly) * SCREEN_WIDTH + self.pixel_x] = color;
         self.pixel_x += 1;
 
@@ -392,24 +407,78 @@ impl Ppu {
         }
     }
 
-    fn visible_sprite_count(&self) -> u8 {
+    fn begin_due_sprite_fetch(&mut self) {
+        if self.sprite_fetch_stall != 0 {
+            return;
+        }
+
+        let pixel_x = i16::try_from(self.pixel_x).expect("screen width fits in i16");
+        let mut next_sprite = None;
+        for (slot, selected) in self.selected_sprites.iter().enumerate() {
+            let Some(selected) = selected else {
+                continue;
+            };
+            let sprite = self.oam_entry(selected.oam_index);
+            if selected.fetch_started || i16::from(sprite.x) - 8 > pixel_x {
+                continue;
+            }
+
+            next_sprite = match next_sprite {
+                None => Some(slot),
+                Some(current) => {
+                    let candidate = self.oam_entry(selected.oam_index);
+                    let current_selected = self.selected_sprites[current]
+                        .expect("selected sprite slot remains populated");
+                    let current_sprite = self.oam_entry(current_selected.oam_index);
+                    if (candidate.x, selected.oam_index)
+                        < (current_sprite.x, current_selected.oam_index)
+                    {
+                        Some(slot)
+                    } else {
+                        Some(current)
+                    }
+                }
+            };
+        }
+
+        if let Some(slot) = next_sprite {
+            self.selected_sprites[slot]
+                .as_mut()
+                .expect("selected sprite slot remains populated")
+                .fetch_started = true;
+            self.sprite_fetch_stall = 6;
+        }
+    }
+
+    fn select_sprites_for_line(&self, line: u8) -> [Option<SelectedSprite>; 10] {
+        let mut selected = [None; 10];
         if !self.lcdc.sprites_enabled() {
-            return 0;
+            return selected;
         }
 
         let sprite_height = i16::from(self.lcdc.sprite_height());
-        let line = i16::from(self.ly);
-        let mut count = 0;
-        for sprite_index in 0..40 {
-            let y = i16::from(self.oam[sprite_index * 4]) - 16;
-            if (y..y + sprite_height).contains(&line) {
-                count += 1;
-                if count == 10 {
-                    break;
-                }
+        let line = i16::from(line);
+        for index in 0..40 {
+            let sprite = OamEntry::from_oam(&self.oam[index * 4..index * 4 + 4]);
+            let sprite_y = i16::from(sprite.y) - 16;
+            if !(sprite_y..sprite_y + sprite_height).contains(&line) {
+                continue;
             }
+
+            let slot = selected.iter().position(Option::is_none);
+            let Some(slot) = slot else {
+                break;
+            };
+            selected[slot] = Some(SelectedSprite {
+                oam_index: index,
+                fetch_started: false,
+            });
         }
-        count
+        selected
+    }
+
+    fn oam_entry(&self, index: usize) -> OamEntry {
+        OamEntry::from_oam(&self.oam[index * 4..index * 4 + 4])
     }
 
     fn sprite_color_at(
@@ -424,26 +493,11 @@ impl Ppu {
         let line = i16::from(self.ly);
         let screen_x = i16::try_from(screen_x).expect("screen width fits in i16");
         let sprite_height = self.lcdc.sprite_height();
-        let mut selected = Vec::with_capacity(10);
+        let mut visible_color = None;
+        let mut visible_priority = None;
 
-        for index in 0..40 {
-            let sprite = OamEntry::from_oam(&self.oam[index * 4..index * 4 + 4]);
-            let sprite_y = i16::from(sprite.y) - 16;
-            if (sprite_y..sprite_y + i16::from(sprite_height)).contains(&line) {
-                selected.push((index, sprite));
-                if selected.len() == 10 {
-                    break;
-                }
-            }
-        }
-
-        selected.sort_by(|(left_index, left), (right_index, right)| {
-            left.x
-                .cmp(&right.x)
-                .then_with(|| left_index.cmp(right_index))
-        });
-
-        for (_, sprite) in selected {
+        for selected in self.selected_sprites.iter().flatten() {
+            let sprite = self.oam_entry(selected.oam_index);
             let sprite_x = i16::from(sprite.x) - 8;
             if !(sprite_x..sprite_x + 8).contains(&screen_x)
                 || (sprite.bg_priority && background_color != 0)
@@ -469,11 +523,15 @@ impl Ppu {
             let column = usize::try_from(screen_x - sprite_x).expect("sprite covers pixel");
             let color = pixels[if sprite.x_flip { 7 - column } else { column }];
             if color != 0 {
-                return Some((color, sprite.palette));
+                let priority = (sprite.x, selected.oam_index);
+                if visible_priority.is_none_or(|current| priority < current) {
+                    visible_color = Some((color, sprite.palette));
+                    visible_priority = Some(priority);
+                }
             }
         }
 
-        None
+        visible_color
     }
 
     fn render_scanline(&mut self, line: u8) {
@@ -768,6 +826,12 @@ impl BackgroundFetcher {
                 self.low = vram[offset];
             }
             _ => {
+                // The fetcher waits at its push stage until the FIFO is
+                // empty. Advancing to the next tile here would silently drop
+                // a row whenever the producer outran pixel output.
+                if self.fifo_len != 0 {
+                    return;
+                }
                 let offset = lcdc.tile_data_offset(self.tile_number) + row * 2 + 1;
                 self.push_row(decode_tile_row(self.low, vram[offset]));
                 self.tile_x = self.tile_x.wrapping_add(1);
@@ -777,9 +841,7 @@ impl BackgroundFetcher {
     }
 
     fn push_row(&mut self, pixels: [u8; 8]) {
-        if self.fifo_len > 8 {
-            return;
-        }
+        debug_assert_eq!(self.fifo_len, 0, "rows enter an empty pixel FIFO");
         for pixel in pixels {
             let index = (self.fifo_head + self.fifo_len) % self.fifo.len();
             self.fifo[index] = pixel;
@@ -899,6 +961,12 @@ pub struct OamEntry {
     pub y_flip: bool,
     pub x_flip: bool,
     pub palette: ObjectPalette,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SelectedSprite {
+    oam_index: usize,
+    fetch_started: bool,
 }
 
 impl OamEntry {
@@ -1503,5 +1571,66 @@ mod tests {
             DMG_SHADES[2],
             "a palette write should affect pixels produced after the write"
         );
+    }
+
+    #[test]
+    fn disabled_background_does_not_hide_priority_sprites_during_fifo_transfer() {
+        let mut ppu = Ppu::new();
+        let mut interrupts = InterruptFlags::default();
+        ppu.write_register(0xFF40, 0x92);
+        ppu.write_register(0xFF47, 0x00);
+        ppu.write_register(0xFF48, 0x30);
+
+        // The hidden background supplies nonzero fetched pixels. A priority
+        // sprite must nevertheless treat it as background colour zero.
+        ppu.write_vram(0x0000, 0xFF);
+        ppu.write_vram(0x0001, 0x00);
+        ppu.write_vram(0x0010, 0x00);
+        ppu.write_vram(0x0011, 0xFF);
+        ppu.write_oam(0, 16);
+        ppu.write_oam(1, 8);
+        ppu.write_oam(2, 1);
+        ppu.write_oam(3, 0x80);
+
+        ppu.tick(TCycles(110), &mut interrupts);
+
+        assert_eq!(
+            ppu.framebuffer()[0],
+            DMG_SHADES[3],
+            "a priority sprite should appear over a disabled background layer"
+        );
+    }
+
+    #[test]
+    fn fifo_waits_to_push_instead_of_skipping_background_tiles() {
+        let mut ppu = Ppu::new();
+        let mut interrupts = InterruptFlags::default();
+        ppu.write_register(0xFF47, 0b1110_0100);
+        ppu.write_vram(0x0000, 0xFF);
+        ppu.write_vram(0x0001, 0x00);
+        ppu.write_vram(0x0010, 0x00);
+        ppu.write_vram(0x0011, 0xFF);
+
+        for tile_column in 0..20 {
+            ppu.write_vram(
+                0x1800 + u16::try_from(tile_column).expect("tile-map offset fits in u16"),
+                u8::try_from(tile_column % 2).expect("tile number fits in u8"),
+            );
+        }
+
+        ppu.tick(TCycles(400), &mut interrupts);
+
+        for tile_column in 0..20 {
+            let expected = if tile_column % 2 == 0 {
+                DMG_SHADES[1]
+            } else {
+                DMG_SHADES[2]
+            };
+            assert_eq!(
+                ppu.framebuffer()[tile_column * 8],
+                expected,
+                "FIFO output should retain tile column {tile_column}"
+            );
+        }
     }
 }

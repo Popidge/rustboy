@@ -1972,6 +1972,40 @@ Add a test-only helper for constructing a minimal 32 KiB ROM image with configur
 - This helper is ready for future CPU, bus, and cartridge tests that need minimal ROM bytes at `0x0100`.
 # Milestones
 
+## 0056: Repair FIFO tile output and sprite-layer composition
+
+Date: 2026-06-20
+
+Status: Partial
+
+### Goal
+
+Repair the DMG FIFO regressions exposed by DMG Acid 2 without reverting the dot-driven mode-3 model.
+
+### Changes
+
+- Made the background fetcher wait at its push phase until its FIFO is empty, rather than dropping a tile row and advancing to the next tile.
+- Treated a disabled DMG background/window layer as colour zero for sprite-priority composition.
+- Kept a fixed selected-sprite line set for mode 3 and scheduled its compact fetch stalls at the selected sprites' X positions.
+
+### Tests
+
+- `cargo fmt`
+- `cargo test`
+- `cargo clippy --all-targets --all-features`
+- Added FIFO tile-retention and disabled-background sprite-priority unit tests.
+- Ran `cargo run -p gb-romtest -- run --profile dmg --rom test-roms/dmg-acid2/dmg-acid2.gb --out reports/acid2-live-oam --format both`.
+
+### Decisions
+
+- Retained the dot-driven FIFO and fixed the producer/consumer state error instead of restoring end-of-scanline rendering.
+- Added no dependencies.
+
+### Notes
+
+- DMG Acid 2 screenshot difference improved from 4,468 to 115 pixels.
+- The remaining 115 pixels are missing black bottom-text sprite pixels on rows 133-139. All in-repo tests and clippy pass; next work should model the remaining OAM selection/fetch detail rather than special-casing the ROM.
+
 ## 0055: Replace fixed mode 3 with a DMG fetcher/FIFO pipeline
 
 Date: 2026-06-19

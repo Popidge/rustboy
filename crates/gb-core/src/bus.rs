@@ -6,6 +6,7 @@
 
 use crate::{
     apu::{Apu, StereoSample},
+    boot_rom::DmgBootRom,
     cartridge::Cartridge,
     cpu::TCycles,
     interrupt::{Interrupt, InterruptFlags},
@@ -43,6 +44,7 @@ const OAM_SIZE: u8 = 0xA0;
 const UNUSABLE_OAM_START: u16 = 0xFEA0;
 const UNUSABLE_OAM_END: u16 = 0xFEFF;
 const DMA_ADDR: u16 = 0xFF46;
+const BOOT_ROM_DISABLE_ADDR: u16 = 0xFF50;
 const PPU_REGISTER_START: u16 = 0xFF40;
 const PPU_REGISTER_END: u16 = 0xFF4B;
 const CPU_MACHINE_CYCLE: TCycles = TCycles(4);
@@ -144,6 +146,7 @@ pub struct BusTcycleRecord {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Bus {
     cartridge: Cartridge,
+    boot_rom: Option<DmgBootRom>,
     ppu: Ppu,
     joypad: Joypad,
     serial: Serial,
@@ -213,8 +216,19 @@ impl Bus {
     /// Creates a bus that owns the loaded cartridge and empty internal memory.
     #[must_use]
     pub fn new(cartridge: Cartridge) -> Self {
+        Self::new_with_optional_boot_rom(cartridge, None)
+    }
+
+    /// Creates a bus in the DMG power-on state with a mapped boot ROM.
+    #[must_use]
+    pub fn new_dmg_boot(cartridge: Cartridge, boot_rom: DmgBootRom) -> Self {
+        Self::new_with_optional_boot_rom(cartridge, Some(boot_rom))
+    }
+
+    fn new_with_optional_boot_rom(cartridge: Cartridge, boot_rom: Option<DmgBootRom>) -> Self {
         Self {
             cartridge,
+            boot_rom,
             ppu: Ppu::new(),
             joypad: Joypad::new(),
             serial: Serial::new(),
@@ -241,7 +255,11 @@ impl Bus {
     #[must_use]
     pub fn read8(&self, address: u16) -> u8 {
         match address {
-            0x0000..=0x7FFF => self.cartridge.read_rom(address).unwrap_or(0xFF),
+            0x0000..=0x00FF => self.boot_rom.as_ref().map_or_else(
+                || self.cartridge.read_rom(address).unwrap_or(0xFF),
+                |boot_rom| boot_rom.read(usize::from(address)),
+            ),
+            0x0100..=0x7FFF => self.cartridge.read_rom(address).unwrap_or(0xFF),
             VRAM_START..=VRAM_END => self.ppu.read_vram(address - VRAM_START),
             CARTRIDGE_RAM_START..=CARTRIDGE_RAM_END => self.cartridge.read_ram(address),
             WRAM_START..=WRAM_END => self.wram[wram_index(address)],
@@ -254,6 +272,7 @@ impl Bus {
             INTERRUPT_FLAGS_ADDR => self.interrupt_flags.read_if(),
             0xFF10..=0xFF3F => self.apu.read(address),
             DMA_ADDR => self.oam_dma.source_high,
+            BOOT_ROM_DISABLE_ADDR => 0xFF,
             PPU_REGISTER_START..=PPU_REGISTER_END => self.ppu.read_register(address),
             HRAM_START..=HRAM_END => self.hram[hram_index(address)],
             INTERRUPT_ENABLE_ADDR => self.interrupt_enable.raw(),
@@ -284,6 +303,7 @@ impl Bus {
             INTERRUPT_FLAGS_ADDR => self.interrupt_flags.write_if(value),
             0xFF10..=0xFF3F => self.apu.write(address, value),
             DMA_ADDR => self.oam_dma.start(value),
+            BOOT_ROM_DISABLE_ADDR if value != 0 => self.boot_rom = None,
             PPU_REGISTER_START..=PPU_REGISTER_END => self.ppu.write_register(address, value),
             HRAM_START..=HRAM_END => self.hram[hram_index(address)] = value,
             INTERRUPT_ENABLE_ADDR => self.interrupt_enable.set_raw(value),

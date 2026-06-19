@@ -1,7 +1,14 @@
 mod common;
 
 use common::minimal_rom_with_entry_point;
-use gb_core::{bus::Bus, cartridge::Cartridge, cpu::TCycles, interrupt::Interrupt, joypad::Button};
+use gb_core::{
+    boot_rom::{DmgBootRom, DMG_BOOT_ROM_SIZE},
+    bus::Bus,
+    cartridge::Cartridge,
+    cpu::TCycles,
+    interrupt::Interrupt,
+    joypad::Button,
+};
 
 const TITLE_START: usize = 0x0134;
 const CARTRIDGE_TYPE_ADDR: usize = 0x0147;
@@ -57,6 +64,64 @@ fn read8_routes_cartridge_rom_reads() {
         bus.read8(0x0100),
         0x42,
         "0x0100 should read from cartridge ROM through the bus"
+    );
+}
+
+#[test]
+fn boot_rom_overlays_low_cartridge_rom_until_ff50_is_written_nonzero() {
+    let mut rom = minimal_rom_with_entry_point(&[]);
+    rom[0x0000] = 0x12;
+    rom[0x00FF] = 0x34;
+    rom[HEADER_CHECKSUM_ADDR] = calculate_header_checksum(&rom);
+    let cartridge = Cartridge::from_bytes(rom).expect("test ROM should parse");
+
+    let mut boot_bytes = vec![0; DMG_BOOT_ROM_SIZE];
+    boot_bytes[0x0000] = 0xAB;
+    boot_bytes[0x00FF] = 0xCD;
+    let boot_rom = DmgBootRom::from_bytes(boot_bytes).expect("test boot ROM should validate");
+    let mut bus = Bus::new_dmg_boot(cartridge, boot_rom);
+
+    assert_eq!(
+        bus.read8(0x0000),
+        0xAB,
+        "boot ROM should overlay cartridge address 0000"
+    );
+    assert_eq!(
+        bus.read8(0x00FF),
+        0xCD,
+        "boot ROM should overlay cartridge address 00FF"
+    );
+    assert_eq!(
+        bus.read8(0x0100),
+        0x00,
+        "boot ROM must not cover cartridge address 0100"
+    );
+    assert_eq!(bus.read8(0xFF50), 0xFF, "FF50 is write-only on the DMG bus");
+
+    bus.write8(0xFF50, 0x00);
+    assert_eq!(
+        bus.read8(0x0000),
+        0xAB,
+        "zero must not disable the boot ROM"
+    );
+
+    bus.write8(0xFF50, 0x01);
+    assert_eq!(
+        bus.read8(0x0000),
+        0x12,
+        "nonzero FF50 writes should expose cartridge ROM"
+    );
+    assert_eq!(
+        bus.read8(0x00FF),
+        0x34,
+        "FF50 should unmap the complete boot-ROM range"
+    );
+
+    bus.write8(0xFF50, 0x00);
+    assert_eq!(
+        bus.read8(0x0000),
+        0x12,
+        "FF50 must not remap a disabled boot ROM"
     );
 }
 

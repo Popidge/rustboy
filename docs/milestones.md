@@ -1,5 +1,41 @@
 # Milestones
 
+## 0053: Add optional user-supplied DMG boot-ROM startup
+
+Date: 2026-06-19
+
+Status: Complete
+
+### Goal
+
+Support a user-supplied DMG boot ROM without embedding or distributing boot-ROM bytes, while retaining deterministic post-boot startup by default.
+
+### Changes
+
+- Added validated owned `DmgBootRom` storage, requiring exactly 256 bytes.
+- Added separate DMG power-on CPU construction and Bus boot-ROM mapping at `0000..=00FF`.
+- Implemented write-only `FF50`: a nonzero write permanently unmaps the boot ROM; zero does not disable or remap it.
+- Added `GameBoy::new_with_boot_rom` and `GameBoy::from_rom_with_boot_rom`; existing constructors retain post-boot fast-start behaviour.
+- Added the `gb-desktop <rom.gb> --boot-rom <path>` option, shared `GameBoy` stepping for desktop headless modes, and no boot-ROM asset or dependency.
+
+### Tests
+
+- `cargo fmt`
+- `cargo test` (221 passed)
+- `cargo clippy --all-targets --all-features`
+- Added unit and integration coverage for image-length validation, power-on CPU state, ROM overlay, FF50 behaviour, cartridge entry at `0100`, and desktop option parsing.
+- Attempted the optional local `dmg_boot.bin` smoke test with an AGE DMG ROM. `gb-desktop` overflows its main-thread stack even with no `--boot-rom` and one serial step, so it is an existing desktop-runner issue rather than a boot-ROM mapping result. The generated core test verifies normal execution reaches `0100` after FF50 unmaps the supplied ROM.
+
+### Decisions
+
+- Boot-ROM bytes remain user-owned and gitignored; `gb-core` stores only a validated fixed-size array.
+- FF50 state stays Bus-owned, preserving CPU-to-hardware routing and one-way DMG unmapping semantics.
+- Added no dependencies and no architecture-rule changes.
+
+### Notes
+
+- Follow up separately on the `gb-desktop` main-thread stack overflow before treating its CLI as a useful optional boot smoke harness.
+
 ## 0052: Finish timer reload ordering and model serial transfer time
 
 Date: 2026-06-19

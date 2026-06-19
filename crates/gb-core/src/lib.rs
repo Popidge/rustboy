@@ -1,6 +1,7 @@
 #![doc = "Core Game Boy emulation primitives."]
 
 pub mod apu;
+pub mod boot_rom;
 pub mod bus;
 pub mod cartridge;
 pub mod cpu;
@@ -11,11 +12,13 @@ pub mod serial;
 pub mod timer;
 
 use apu::StereoSample;
+use boot_rom::{BootRomError, DmgBootRom};
 use bus::Bus;
 use cartridge::{Cartridge, CartridgeError, SaveRamError};
 use cpu::{Cpu, CpuError, CpuRegisters, TCycles};
 use joypad::Button;
 use ppu::FRAMEBUFFER_PIXELS;
+use std::fmt;
 
 /// Top-level owner for the emulated DMG Game Boy.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -34,6 +37,15 @@ impl GameBoy {
         }
     }
 
+    /// Creates a Game Boy in its DMG power-on state with a mapped boot ROM.
+    #[must_use]
+    pub fn new_with_boot_rom(cartridge: Cartridge, boot_rom: DmgBootRom) -> Self {
+        Self {
+            cpu: Cpu::new_dmg_boot(),
+            bus: Bus::new_dmg_boot(cartridge, boot_rom),
+        }
+    }
+
     /// Creates a Game Boy from raw ROM bytes.
     ///
     /// # Errors
@@ -42,6 +54,18 @@ impl GameBoy {
     /// supported by the current cartridge implementation.
     pub fn from_rom(rom: Vec<u8>) -> Result<Self, CartridgeError> {
         Cartridge::from_bytes(rom).map(Self::new)
+    }
+
+    /// Creates a Game Boy from cartridge and user-supplied boot-ROM bytes.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when either image is invalid.
+    pub fn from_rom_with_boot_rom(rom: Vec<u8>, boot_rom: Vec<u8>) -> Result<Self, EmulatorError> {
+        let cartridge = Cartridge::from_bytes(rom).map_err(EmulatorError::Cartridge)?;
+        let boot_rom = DmgBootRom::from_bytes(boot_rom).map_err(EmulatorError::BootRom)?;
+
+        Ok(Self::new_with_boot_rom(cartridge, boot_rom))
     }
 
     /// Executes one CPU instruction and advances bus-owned hardware.
@@ -151,6 +175,24 @@ impl GameBoy {
     }
 }
 
+/// Error returned while constructing a full emulated machine from image bytes.
+#[derive(Debug)]
+pub enum EmulatorError {
+    Cartridge(CartridgeError),
+    BootRom(BootRomError),
+}
+
+impl fmt::Display for EmulatorError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Cartridge(error) => error.fmt(formatter),
+            Self::BootRom(error) => error.fmt(formatter),
+        }
+    }
+}
+
+impl std::error::Error for EmulatorError {}
+
 #[cfg(test)]
 mod tests {
     use super::GameBoy;
@@ -216,6 +258,56 @@ mod tests {
             game_boy.debug_read8(0xFF04),
             0x01,
             "64 NOP opcode fetches should advance DIV by 256 T-cycles once"
+        );
+    }
+
+    #[test]
+    fn boot_rom_execution_reaches_cartridge_entry_point_after_ff50_disable() {
+        let mut cartridge_rom = minimal_rom();
+        cartridge_rom[0x0000] = 0x12;
+        cartridge_rom[0x0100] = 0x00;
+
+        let mut boot_rom = vec![0; crate::boot_rom::DMG_BOOT_ROM_SIZE];
+        boot_rom[0x00FC] = 0x3E; // LD A, $01
+        boot_rom[0x00FD] = 0x01;
+        boot_rom[0x00FE] = 0xE0; // LDH ($50), A
+        boot_rom[0x00FF] = 0x50;
+
+        let mut game_boy = GameBoy::from_rom_with_boot_rom(cartridge_rom, boot_rom)
+            .expect("test cartridge and boot ROM should load");
+
+        assert_eq!(
+            game_boy.registers().pc,
+            0x0000,
+            "boot start should reset PC to zero"
+        );
+        assert_eq!(
+            game_boy.debug_read8(0x0000),
+            0x00,
+            "boot ROM should initially overlay cartridge"
+        );
+
+        for _ in 0..254 {
+            game_boy.step().expect("boot instructions should execute");
+        }
+
+        assert_eq!(
+            game_boy.registers().pc,
+            0x0100,
+            "FF50 tail should reach cartridge entry point"
+        );
+        assert_eq!(
+            game_boy.debug_read8(0x0000),
+            0x12,
+            "FF50 should expose cartridge ROM after boot"
+        );
+        game_boy
+            .step()
+            .expect("cartridge entry instruction should execute");
+        assert_eq!(
+            game_boy.registers().pc,
+            0x0101,
+            "execution should continue from cartridge address 0100"
         );
     }
 }

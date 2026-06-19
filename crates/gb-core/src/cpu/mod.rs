@@ -89,6 +89,19 @@ pub struct Cpu {
 }
 
 impl Cpu {
+    /// Creates a CPU in its DMG power-on state for boot-ROM execution.
+    #[must_use]
+    pub fn new_dmg_boot() -> Self {
+        Self {
+            registers: CpuRegisters::new(),
+            ime: false,
+            ime_enable_pending: false,
+            halt_bug_pending: false,
+            run_state: CpuRunState::Running,
+            prefetched_opcode: None,
+        }
+    }
+
     /// Creates a CPU initialized as though the DMG boot ROM has already run.
     ///
     /// The emulator does not execute the boot ROM yet, so this constructor
@@ -1652,6 +1665,42 @@ mod tests {
         assert_eq!(registers.hl(), 0x014D, "post-boot HL should be 0x014D");
         assert_eq!(registers.sp, 0xFFFE, "post-boot SP should be 0xFFFE");
         assert_eq!(registers.pc, 0x0100, "post-boot PC should be 0x0100");
+    }
+
+    #[test]
+    fn new_dmg_boot_starts_from_power_on_register_state() {
+        let cpu = Cpu::new_dmg_boot();
+        let registers = cpu.registers();
+
+        assert_eq!(
+            registers.af(),
+            0x0000,
+            "boot execution should start with AF cleared"
+        );
+        assert_eq!(
+            registers.bc(),
+            0x0000,
+            "boot execution should start with BC cleared"
+        );
+        assert_eq!(
+            registers.de(),
+            0x0000,
+            "boot execution should start with DE cleared"
+        );
+        assert_eq!(
+            registers.hl(),
+            0x0000,
+            "boot execution should start with HL cleared"
+        );
+        assert_eq!(
+            registers.sp, 0x0000,
+            "boot execution should start with SP cleared"
+        );
+        assert_eq!(
+            registers.pc, 0x0000,
+            "boot execution should begin at address 0"
+        );
+        assert!(!cpu.ime(), "boot execution should begin with IME disabled");
     }
 
     #[test]

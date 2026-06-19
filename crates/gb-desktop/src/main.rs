@@ -2,9 +2,8 @@ use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use font8x8::UnicodeFonts;
 use gb_core::{
     apu::{StereoSample, AUDIO_SAMPLE_RATE},
-    bus::Bus,
+    boot_rom::DmgBootRom,
     cartridge::Cartridge,
-    cpu::Cpu,
     joypad::Button,
     ppu::{SCREEN_HEIGHT, SCREEN_WIDTH},
     GameBoy,
@@ -59,7 +58,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let Some(rom_path) = options.rom_path else {
         eprintln!("Usage: gb-desktop [--harness]");
-        eprintln!("       gb-desktop <rom.gb> [--serial-steps N]");
+        eprintln!("       gb-desktop <rom.gb> [--boot-rom dmg_boot.bin] [--serial-steps N]");
         eprintln!("       gb-desktop <rom.gb> --mooneye-steps N");
         eprintln!("       gb-desktop <rom.gb> --frames N --dump-frame hash|blocks:N|pixels|all");
         eprintln!("       gb-desktop --demo");
@@ -69,6 +68,12 @@ fn main() -> Result<(), Box<dyn Error>> {
     let rom_path = PathBuf::from(rom_path);
     let rom = fs::read(&rom_path)?;
     let cartridge = Cartridge::from_bytes(rom)?;
+    let boot_rom = options
+        .boot_rom_path
+        .map(fs::read)
+        .transpose()?
+        .map(DmgBootRom::from_bytes)
+        .transpose()?;
 
     println!("Title: {}", cartridge.title());
     println!("Type: {}", cartridge.cartridge_type());
@@ -76,14 +81,14 @@ fn main() -> Result<(), Box<dyn Error>> {
     println!("RAM: {}", cartridge.ram_size());
 
     if let Some(steps) = options.serial_steps {
-        run_serial_output(cartridge, steps)?;
+        run_serial_output(cartridge, boot_rom, steps)?;
     } else if let Some(steps) = options.mooneye_steps {
-        run_mooneye_output(cartridge, steps)?;
+        run_mooneye_output(cartridge, boot_rom, steps)?;
     } else if let Some(frames) = options.frames {
-        run_frame_dump(cartridge, frames, options.dump_frame)?;
+        run_frame_dump(cartridge, boot_rom, frames, options.dump_frame)?;
     } else {
         let save_path = save_path_for_rom(&rom_path);
-        let mut game_boy = GameBoy::new(cartridge);
+        let mut game_boy = new_game_boy(cartridge, boot_rom);
         load_save_if_present(&mut game_boy, &save_path)?;
         run_window(DisplaySource::Emulator(Box::new(game_boy), save_path))?;
     }
@@ -94,6 +99,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 #[derive(Debug, Default)]
 struct Options {
     rom_path: Option<String>,
+    boot_rom_path: Option<String>,
     serial_steps: Option<usize>,
     mooneye_steps: Option<usize>,
     frames: Option<usize>,
@@ -114,6 +120,12 @@ impl Options {
                         return Err("--serial-steps requires a step count".into());
                     };
                     options.serial_steps = Some(value.parse()?);
+                }
+                "--boot-rom" => {
+                    let Some(path) = iter.next() else {
+                        return Err("--boot-rom requires a 256-byte DMG boot ROM path".into());
+                    };
+                    options.boot_rom_path = Some(path);
                 }
                 "--mooneye-steps" => {
                     let Some(value) = iter.next() else {
@@ -180,16 +192,25 @@ impl std::str::FromStr for FrameDumpMode {
     }
 }
 
-fn run_serial_output(cartridge: Cartridge, steps: usize) -> Result<(), Box<dyn Error>> {
-    let mut cpu = Cpu::new_dmg_post_boot();
-    let mut bus = Bus::new(cartridge);
+fn new_game_boy(cartridge: Cartridge, boot_rom: Option<DmgBootRom>) -> GameBoy {
+    match boot_rom {
+        Some(boot_rom) => GameBoy::new_with_boot_rom(cartridge, boot_rom),
+        None => GameBoy::new(cartridge),
+    }
+}
+
+fn run_serial_output(
+    cartridge: Cartridge,
+    boot_rom: Option<DmgBootRom>,
+    steps: usize,
+) -> Result<(), Box<dyn Error>> {
+    let mut game_boy = new_game_boy(cartridge, boot_rom);
 
     for _ in 0..steps {
-        let cycles = cpu.step(&mut bus)?;
-        bus.tick(cycles);
+        game_boy.step()?;
     }
 
-    let output = bus.take_serial_output();
+    let output = game_boy.take_serial_output();
 
     if !output.is_empty() {
         println!("Serial: {}", String::from_utf8_lossy(&output));
@@ -198,15 +219,18 @@ fn run_serial_output(cartridge: Cartridge, steps: usize) -> Result<(), Box<dyn E
     Ok(())
 }
 
-fn run_mooneye_output(cartridge: Cartridge, steps: usize) -> Result<(), Box<dyn Error>> {
-    let mut cpu = Cpu::new_dmg_post_boot();
-    let mut bus = Bus::new(cartridge);
+fn run_mooneye_output(
+    cartridge: Cartridge,
+    boot_rom: Option<DmgBootRom>,
+    steps: usize,
+) -> Result<(), Box<dyn Error>> {
+    let mut game_boy = new_game_boy(cartridge, boot_rom);
 
     for step in 0..steps {
-        match cpu.step(&mut bus) {
-            Ok(cycles) => bus.tick(cycles),
+        match game_boy.step() {
+            Ok(_) => {}
             Err(gb_core::cpu::CpuError::UnimplementedOpcode { pc, opcode }) if opcode == 0xED => {
-                let registers = cpu.registers();
+                let registers = game_boy.registers();
                 let passed = registers.b == 3
                     && registers.c == 5
                     && registers.d == 8
@@ -232,7 +256,7 @@ fn run_mooneye_output(cartridge: Cartridge, steps: usize) -> Result<(), Box<dyn 
         }
     }
 
-    let registers = cpu.registers();
+    let registers = game_boy.registers();
     println!(
         "Mooneye: Timeout steps={steps} B={} C={} D={} E={} H={} L={}",
         registers.b, registers.c, registers.d, registers.e, registers.h, registers.l
@@ -243,10 +267,11 @@ fn run_mooneye_output(cartridge: Cartridge, steps: usize) -> Result<(), Box<dyn 
 
 fn run_frame_dump(
     cartridge: Cartridge,
+    boot_rom: Option<DmgBootRom>,
     frames: usize,
     dump_mode: FrameDumpMode,
 ) -> Result<(), Box<dyn Error>> {
-    let mut game_boy = GameBoy::new(cartridge);
+    let mut game_boy = new_game_boy(cartridge, boot_rom);
 
     for _ in 0..frames {
         game_boy.run_until_frame()?;
@@ -1828,6 +1853,19 @@ mod tests {
 
         assert_eq!(options.rom_path.as_deref(), Some("reg_f.gb"));
         assert_eq!(options.mooneye_steps, Some(1000));
+    }
+
+    #[test]
+    fn options_parse_user_supplied_boot_rom() {
+        let options = Options::parse([
+            "rom.gb".to_string(),
+            "--boot-rom".to_string(),
+            "dmg_boot.bin".to_string(),
+        ])
+        .expect("boot ROM option should parse");
+
+        assert_eq!(options.rom_path.as_deref(), Some("rom.gb"));
+        assert_eq!(options.boot_rom_path.as_deref(), Some("dmg_boot.bin"));
     }
 
     #[test]

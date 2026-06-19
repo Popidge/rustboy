@@ -22,6 +22,7 @@ Desktop.ini
 /traces/
 /reports/
 /reference/
+dmg_boot.bin
 
 # Profiling and coverage output
 /coverage/

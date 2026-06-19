@@ -359,7 +359,7 @@ fn writing_dma_register_starts_stateful_oam_transfer() {
 }
 
 #[test]
-fn cpu_oam_access_is_blocked_during_oam_dma() {
+fn active_oam_dma_leaves_only_hram_and_dma_register_cpu_accessible() {
     let mut bus = test_bus_with_rom_byte(0x0100, 0x42);
 
     bus.write8(0xC000, 0x12);
@@ -376,8 +376,8 @@ fn cpu_oam_access_is_blocked_during_oam_dma() {
 
     assert_eq!(
         bus.cpu_read8(0xC000),
-        0x12,
-        "CPU WRAM reads should remain available during active OAM DMA"
+        0xFF,
+        "DMA should block CPU WRAM reads"
     );
     assert_eq!(
         bus.cpu_read8(0xFE00),
@@ -389,15 +389,16 @@ fn cpu_oam_access_is_blocked_during_oam_dma() {
         0x34,
         "CPU HRAM reads should remain available during active OAM DMA"
     );
+    assert_eq!(
+        bus.cpu_read8(0xFF0F),
+        0xFF,
+        "DMA should block CPU access to interrupt registers outside HRAM"
+    );
 
     bus.cpu_write8(0xC001, 0x56);
     bus.cpu_write8(0xFF81, 0x78);
 
-    assert_eq!(
-        bus.read8(0xC001),
-        0x56,
-        "CPU WRAM writes should remain available during active OAM DMA"
-    );
+    assert_eq!(bus.read8(0xC001), 0x00, "DMA should ignore CPU WRAM writes");
     assert_eq!(
         bus.read8(0xFF81),
         0x78,

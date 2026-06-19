@@ -592,7 +592,10 @@ impl Bus {
 }
 
 fn cpu_oam_dma_blocks_address(address: u16) -> bool {
-    matches!(address, OAM_START..=UNUSABLE_OAM_END)
+    // During active DMG OAM DMA, the CPU bus is owned by the transfer engine.
+    // HRAM remains reachable because it has its own internal memory path; FF46
+    // is retained as an explicit exception so software can restart DMA.
+    !matches!(address, HRAM_START..=HRAM_END | DMA_ADDR)
 }
 
 fn wram_index(address: u16) -> usize {

@@ -1,5 +1,47 @@
 # Milestones
 
+## 0051: Complete DMG OAM-DMA arbitration
+
+Date: 2026-06-19
+
+Status: Complete
+
+### Goal
+
+Model active OAM DMA as ownership of the CPU-visible DMG bus rather than an
+OAM-only access restriction.
+
+### Changes
+
+- Restricted CPU reads and writes during active OAM DMA to HRAM, with FF46
+  retained as the explicit DMA restart/register exception.
+- Preserved the existing two-M-cycle startup, one-byte-per-M-cycle transfer,
+  restart reset, and echo-RAM source translation in Bus-owned DMA state.
+- Reworked the DMA routing test to assert blocked WRAM and interrupt-register
+  access, ignored blocked writes, and available HRAM access.
+
+### Tests
+
+- `cargo fmt`
+- `cargo test` (210 passed)
+- `cargo clippy --all-targets --all-features`
+- Gates passed: Mooneye `oam_dma/basic`, `oam_dma_restart`, and
+  `oam_dma/sources-GS` (one ROM each, breakpoint-register result, 20-second
+  timeout).
+
+### Decisions
+
+- DMA arbitration stays entirely in Bus; CPU instructions continue using the
+  same clocked fetch/read/write helpers.
+- FF46 is deliberately reachable during DMA so software may restart a
+  transfer; no source-specific compatibility exceptions were added.
+- Added no dependencies.
+
+### Notes
+
+- The focused gates validate basic transfer, restart, and source-page handling.
+  Any remaining source-conflict behaviour should become a narrow future rule.
+
 ## 0050: Tighten CPU exceptional sequencing
 
 Date: 2026-06-19

@@ -134,12 +134,26 @@ impl Ppu {
     }
 
     pub fn write_register(&mut self, address: u16, value: u8) {
+        let mut ignored_interrupts = InterruptFlags::default();
+        self.write_register_with_interrupts(address, value, &mut ignored_interrupts);
+    }
+
+    /// Writes an LCD register and immediately evaluates the combined STAT line.
+    ///
+    /// Register writes can raise STAT when they turn a selected source into the
+    /// line's first high edge, so the Bus provides temporary interrupt access.
+    pub fn write_register_with_interrupts(
+        &mut self,
+        address: u16,
+        value: u8,
+        interrupts: &mut InterruptFlags,
+    ) {
         if address == LY_ADDR {
             return;
         }
 
         match address {
-            LCDC_ADDR => self.lcdc.set_raw(value),
+            LCDC_ADDR => self.write_lcdc(value, interrupts),
             STAT_ADDR => self.stat = value & 0xF8,
             SCY_ADDR => self.scy = value,
             SCX_ADDR => self.scx = value,
@@ -151,10 +165,16 @@ impl Ppu {
             WX_ADDR => self.wx = value,
             _ => {}
         }
+
+        self.update_stat_interrupt(interrupts);
     }
 
     pub fn tick(&mut self, cycles: TCycles, interrupts: &mut InterruptFlags) {
         for _ in 0..cycles.0 {
+            if !self.lcdc.enabled() {
+                continue;
+            }
+
             self.line_dots += 1;
             self.update_mode(interrupts);
 
@@ -162,6 +182,18 @@ impl Ppu {
                 self.finish_scanline(interrupts);
             }
         }
+    }
+
+    /// Returns whether the CPU can access VRAM at the current PPU dot.
+    #[must_use]
+    pub fn cpu_can_access_vram(&self) -> bool {
+        !self.lcdc.enabled() || self.mode != PpuMode::PixelTransfer
+    }
+
+    /// Returns whether the CPU can access OAM at the current PPU dot.
+    #[must_use]
+    pub fn cpu_can_access_oam(&self) -> bool {
+        !self.lcdc.enabled() || !matches!(self.mode, PpuMode::OamSearch | PpuMode::PixelTransfer)
     }
 
     #[cfg(any(test, feature = "test-trace"))]
@@ -214,6 +246,29 @@ impl Ppu {
             self.update_stat_interrupt(interrupts);
         } else {
             self.update_mode(interrupts);
+        }
+    }
+
+    fn write_lcdc(&mut self, value: u8, interrupts: &mut InterruptFlags) {
+        let was_enabled = self.lcdc.enabled();
+        self.lcdc.set_raw(value);
+
+        if was_enabled && !self.lcdc.enabled() {
+            // Disabling the LCD immediately returns the PPU to line zero and
+            // mode 0; VRAM and OAM become CPU-accessible.
+            self.ly = 0;
+            self.line_dots = 0;
+            self.mode = PpuMode::HBlank;
+            self.window_y_triggered = false;
+            self.window_line = 0;
+            self.frame_ready = false;
+            self.update_stat_interrupt(interrupts);
+        } else if !was_enabled && self.lcdc.enabled() {
+            self.ly = 0;
+            self.line_dots = 0;
+            self.mode = PpuMode::OamSearch;
+            self.window_y_triggered = false;
+            self.window_line = 0;
         }
     }
 
@@ -484,6 +539,11 @@ impl Lcdc {
     }
 
     #[must_use]
+    fn enabled(self) -> bool {
+        self.bits & 0x80 != 0
+    }
+
+    #[must_use]
     fn background_enabled(self) -> bool {
         self.bits & 0x01 != 0
     }
@@ -609,7 +669,10 @@ mod tests {
         decode_tile, decode_tile_row, OamEntry, ObjectPalette, Ppu, PpuMode, DMG_SHADES,
         SCREEN_WIDTH,
     };
-    use crate::{cpu::TCycles, interrupt::InterruptFlags};
+    use crate::{
+        cpu::TCycles,
+        interrupt::{Interrupt, InterruptFlags},
+    };
 
     #[test]
     fn vram_reads_and_writes_roundtrip() {
@@ -1041,6 +1104,59 @@ mod tests {
             ppu.read_register(0xFF41) & 0x04,
             0x04,
             "STAT coincidence bit should reflect LY == LYC"
+        );
+    }
+
+    #[test]
+    fn disabling_lcd_resets_ly_and_holds_mode_zero_until_reenabled() {
+        let mut ppu = Ppu::new();
+        let mut interrupts = InterruptFlags::default();
+
+        ppu.tick(TCycles(456 + 80), &mut interrupts);
+        ppu.write_register_with_interrupts(0xFF40, 0x11, &mut interrupts);
+
+        assert_eq!(ppu.read_register(0xFF44), 0, "LCD disable should reset LY");
+        assert_eq!(
+            ppu.read_register(0xFF41) & 0x03,
+            0,
+            "LCD off should report mode 0"
+        );
+        assert!(ppu.cpu_can_access_vram(), "LCD off should unlock VRAM");
+        assert!(ppu.cpu_can_access_oam(), "LCD off should unlock OAM");
+
+        ppu.tick(TCycles(456 * 2), &mut interrupts);
+        assert_eq!(
+            ppu.read_register(0xFF44),
+            0,
+            "LCD off should stop LY progression"
+        );
+
+        ppu.write_register_with_interrupts(0xFF40, 0x91, &mut interrupts);
+        assert_eq!(
+            ppu.read_register(0xFF41) & 0x03,
+            2,
+            "LCD enable should begin OAM search"
+        );
+    }
+
+    #[test]
+    fn stat_sources_share_one_rising_edge_interrupt_line() {
+        let mut ppu = Ppu::new();
+        let mut interrupts = InterruptFlags::default();
+
+        ppu.write_register_with_interrupts(0xFF41, 0x60, &mut interrupts);
+        assert_eq!(
+            interrupts.raw() & 0x02,
+            0x02,
+            "initial mode 2 STAT edge should request once"
+        );
+
+        interrupts.clear(Interrupt::LcdStat);
+        ppu.write_register_with_interrupts(0xFF45, 0, &mut interrupts);
+        assert_eq!(
+            interrupts.raw() & 0x02,
+            0,
+            "enabling an already-high coincidence source must not create a second edge"
         );
     }
 }

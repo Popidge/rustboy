@@ -595,6 +595,50 @@ fn ppu_tick_advances_ly_and_requests_vblank_interrupt() {
 }
 
 #[test]
+fn cpu_ppu_memory_access_is_locked_by_the_current_mode_and_unlocked_with_lcd_off() {
+    let mut bus = test_bus_with_rom_byte(0x0100, 0x42);
+
+    bus.write8(0x8000, 0x12);
+    bus.write8(0xFE00, 0x34);
+
+    assert_eq!(
+        bus.cpu_read8(0xFE00),
+        0xFF,
+        "mode 2 should lock CPU OAM reads"
+    );
+    bus.cpu_write8(0xFE00, 0x99);
+    assert_eq!(
+        bus.read8(0xFE00),
+        0x34,
+        "mode 2 should ignore CPU OAM writes"
+    );
+
+    bus.tick(TCycles(80));
+    assert_eq!(
+        bus.cpu_read8(0x8000),
+        0xFF,
+        "mode 3 should lock CPU VRAM reads"
+    );
+    assert_eq!(
+        bus.cpu_read8(0xFE00),
+        0xFF,
+        "mode 3 should lock CPU OAM reads"
+    );
+
+    bus.write8(0xFF40, 0x11);
+    assert_eq!(
+        bus.cpu_read8(0x8000),
+        0x12,
+        "LCD off should unlock CPU VRAM reads"
+    );
+    assert_eq!(
+        bus.cpu_read8(0xFE00),
+        0x34,
+        "LCD off should unlock CPU OAM reads"
+    );
+}
+
+#[test]
 fn write8_ignores_rom_for_rom_only_cartridge() {
     let mut bus = test_bus_with_rom_byte(0x0100, 0x42);
 

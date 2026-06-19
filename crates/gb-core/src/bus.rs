@@ -304,7 +304,10 @@ impl Bus {
             0xFF10..=0xFF3F => self.apu.write(address, value),
             DMA_ADDR => self.oam_dma.start(value),
             BOOT_ROM_DISABLE_ADDR if value != 0 => self.boot_rom = None,
-            PPU_REGISTER_START..=PPU_REGISTER_END => self.ppu.write_register(address, value),
+            PPU_REGISTER_START..=PPU_REGISTER_END => {
+                self.ppu
+                    .write_register_with_interrupts(address, value, &mut self.interrupt_flags);
+            }
             HRAM_START..=HRAM_END => self.hram[hram_index(address)] = value,
             INTERRUPT_ENABLE_ADDR => self.interrupt_enable.set_raw(value),
             _ => {}
@@ -577,11 +580,24 @@ impl Bus {
             return 0xFF;
         }
 
+        if (VRAM_START..=VRAM_END).contains(&address) && !self.ppu.cpu_can_access_vram() {
+            return 0xFF;
+        }
+        if (OAM_START..=OAM_END).contains(&address) && !self.ppu.cpu_can_access_oam() {
+            return 0xFF;
+        }
+
         self.read8(address)
     }
 
     fn cpu_write8_during_dma(&mut self, address: u16, value: u8) {
         if self.oam_dma.is_active() && cpu_oam_dma_blocks_address(address) {
+            return;
+        }
+
+        if ((VRAM_START..=VRAM_END).contains(&address) && !self.ppu.cpu_can_access_vram())
+            || ((OAM_START..=OAM_END).contains(&address) && !self.ppu.cpu_can_access_oam())
+        {
             return;
         }
 

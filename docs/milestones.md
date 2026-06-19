@@ -1970,3 +1970,37 @@ Add a test-only helper for constructing a minimal 32 KiB ROM image with configur
 ### Notes
 
 - This helper is ready for future CPU, bus, and cartridge tests that need minimal ROM bytes at `0x0100`.
+# Milestones
+
+## 0054: Make PPU mode, LCD, STAT, and memory access rules accurate
+
+Date: 2026-06-19
+
+Status: Complete
+
+### Goal
+
+Make the current dot-timed PPU state visible to CPU bus access and model LCD/STAT transitions as hardware state.
+
+### Changes
+
+- Locked CPU VRAM access in mode 3 and OAM access in modes 2 and 3; LCD-off access remains open.
+- Added LCDC enable/disable reset behaviour for LY, dot position, mode, and window state.
+- Evaluated STAT as one combined rising-edge line after PPU register writes and mode/LY changes.
+
+### Tests
+
+- `cargo fmt`
+- `cargo test`
+- `cargo clippy --all-targets --all-features`
+- Added unit and bus-routing coverage for LCD transitions, shared STAT edges, and CPU memory locks.
+- External AGE/GBMicrotest/DMG Acid 2 gates were not locally available.
+
+### Decisions
+
+- Bus debug-style `read8`/`write8` remains unrestricted; CPU clocked accesses alone observe PPU arbitration.
+- No dependencies added; this is a foundational hardware model rather than a ROM-specific patch.
+
+### Notes
+
+- Mode 3 remains fixed-duration pending the fetcher/FIFO work in milestone 0055.

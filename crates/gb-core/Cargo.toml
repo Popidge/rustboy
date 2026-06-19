@@ -7,3 +7,8 @@ publish.workspace = true
 
 [lints]
 workspace = true
+
+[features]
+# Enables the deterministic bus-cycle recorder used by timing tests and local
+# accuracy investigations. It is deliberately opt-in for normal builds.
+test-trace = []

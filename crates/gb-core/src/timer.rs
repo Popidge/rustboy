@@ -23,6 +23,15 @@ pub struct Timer {
     overflow_delay: Option<u8>,
 }
 
+/// Timer state captured alongside a test-only bus-cycle trace record.
+#[cfg(any(test, feature = "test-trace"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct TimerTraceState {
+    pub tima: u8,
+    pub tma: u8,
+    pub overflow_delay: Option<u8>,
+}
+
 impl Timer {
     #[must_use]
     pub fn new() -> Self {
@@ -76,6 +85,16 @@ impl Timer {
             let old_signal = self.timer_signal();
             self.div_counter = self.div_counter.wrapping_add(1);
             self.increment_on_falling_edge(old_signal, self.timer_signal());
+        }
+    }
+
+    #[cfg(any(test, feature = "test-trace"))]
+    #[must_use]
+    pub(crate) fn trace_state(&self) -> TimerTraceState {
+        TimerTraceState {
+            tima: self.tima,
+            tma: self.tma,
+            overflow_delay: self.overflow_delay,
         }
     }
 

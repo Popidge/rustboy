@@ -1,5 +1,89 @@
 # Milestones
 
+## 0048: Establish an accuracy baseline and trace language
+
+Date: 2026-06-19
+
+Status: Complete
+
+### Goal
+
+Make the first differing CPU-visible bus cycle observable before changing any
+timing behaviour.
+
+### Changes
+
+- Added the opt-in `gb-core/test-trace` feature with deterministic records for
+  opcode fetches, reads, writes, and internal idle cycles.
+- Recorded monotonic Bus T-cycle time, operation address/value, PPU LY/mode,
+  IF/IE, timer TIMA/TMA/reload state, and OAM-DMA state.
+- Added focused trace tests covering timer reload, DMA launch, operation order,
+  and direct Bus ticking between traced CPU cycles.
+
+### Tests
+
+- `cargo fmt`
+- `cargo test` (207 passed)
+- `cargo test -p gb-core --features test-trace` (177 passed)
+- `cargo clippy --all-targets --all-features`
+- Gates passed: Blargg `instr_timing`, `mem_timing`, `halt_bug`; Mooneye
+  `timer/tima_reload` and `oam_dma/basic`.
+- Baseline failures: Mooneye `interrupts/ie_push`; AGE `vram-read-dmgC`,
+  `oam-read-dmgC-cgbBC`, and `stat-int-dmgC-cgbBCE`; GBMicrotest
+  `004-tima_cycle_timer` timed out.
+
+### Decisions
+
+- Trace snapshots are taken after a read/write transfer but before its four
+  T-cycles advance Bus-owned hardware; `tcycle` names that cycle's start.
+- Trace collection is disabled in ordinary builds and enabled only in tests or
+  with the dependency-free `test-trace` feature.
+- This milestone changes observability only; it does not special-case any ROM
+  result or alter hardware timing rules.
+
+### Notes
+
+- The trace supports short golden tests now; ROM-runner trace export can be
+  added when a failing gate needs a reference comparison.
+
+## 0047: Document DMG accuracy roadmap
+
+Date: 2026-06-19
+
+Status: Complete
+
+### Goal
+
+Record the agreed DMG-only timing and hardware-accuracy plan before beginning
+the next implementation milestone.
+
+### Changes
+
+- Added the active DMG accuracy roadmap, ordered by timing dependency.
+- Chose a Bus-owned, one-T-cycle dispatcher over an event-deadline scheduler.
+- Documented user-supplied-only DMG boot-ROM support and the prohibition on
+  distributing, embedding, or building boot-ROM bytes.
+- Added trace-first testing guidance for future timing work.
+
+### Tests
+
+- Documentation-only milestone; no executable behaviour changed.
+- `cargo fmt`
+- `cargo test` passed (205 tests).
+- `cargo clippy --all-targets --all-features`
+
+### Decisions
+
+- DMG is the active target; CGB/SGB/SGB2 remain out of scope.
+- Preserve owned hardware components and temporary borrows as the only
+  cross-component data-transfer mechanism.
+- Use Gambatte-Speedrun as a behavioural reference, not a source-copying base.
+
+### Notes
+
+- The next implementation milestone is timing trace and focused ROM-gate
+  baselining.
+
 ## 0046: Add stateful OAM DMA
 
 Date: 2026-06-11

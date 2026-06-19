@@ -21,6 +21,7 @@ Desktop.ini
 /screenshots/
 /traces/
 /reports/
+/reference/
 
 # Profiling and coverage output
 /coverage/

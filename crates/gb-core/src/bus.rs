@@ -47,6 +47,60 @@ const PPU_REGISTER_START: u16 = 0xFF40;
 const PPU_REGISTER_END: u16 = 0xFF4B;
 const CPU_MACHINE_CYCLE: TCycles = TCycles(4);
 
+/// The CPU-visible operation represented by a test-only bus-cycle record.
+///
+/// The trace deliberately describes bus operations rather than CPU opcodes, so
+/// timing investigations can compare a failing run at the hardware boundary.
+#[cfg(any(test, feature = "test-trace"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BusCycleKind {
+    OpcodeFetch,
+    Read,
+    Write,
+    Idle,
+}
+
+#[cfg(not(any(test, feature = "test-trace")))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BusCycleKind {
+    OpcodeFetch,
+    Read,
+    Write,
+    Idle,
+}
+
+/// Small state snapshot captured at the beginning of a CPU machine cycle.
+#[cfg(any(test, feature = "test-trace"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BusTraceState {
+    pub ppu_ly: u8,
+    pub ppu_mode: crate::ppu::PpuMode,
+    pub interrupt_flags: u8,
+    pub interrupt_enable: u8,
+    pub timer_tima: u8,
+    pub timer_tma: u8,
+    /// Remaining T-cycles before the pending TIMA reload, if any.
+    pub timer_overflow_delay: Option<u8>,
+    pub dma_active: bool,
+    pub dma_next_byte: u8,
+    pub dma_startup_mcycles: u8,
+}
+
+/// One deterministic CPU bus-cycle record for timing tests.
+///
+/// `tcycle` is the monotonic bus time at the beginning of the operation. The
+/// snapshot is taken after the read or write transfer, but before that machine
+/// cycle advances the four T-cycles of bus-owned hardware.
+#[cfg(any(test, feature = "test-trace"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BusCycleRecord {
+    pub tcycle: u64,
+    pub kind: BusCycleKind,
+    pub address: Option<u16>,
+    pub value: Option<u8>,
+    pub state: BusTraceState,
+}
+
 /// CPU-facing memory bus.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Bus {
@@ -62,6 +116,9 @@ pub struct Bus {
     interrupt_flags: InterruptFlags,
     oam_dma: OamDma,
     clocked_cpu_cycles: TCycles,
+    elapsed_tcycles: u64,
+    #[cfg(any(test, feature = "test-trace"))]
+    cycle_trace: Vec<BusCycleRecord>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -127,6 +184,9 @@ impl Bus {
             interrupt_flags: InterruptFlags::default(),
             oam_dma: OamDma::inactive(),
             clocked_cpu_cycles: TCycles(0),
+            elapsed_tcycles: 0,
+            #[cfg(any(test, feature = "test-trace"))]
+            cycle_trace: Vec::new(),
         }
     }
 
@@ -206,6 +266,7 @@ impl Bus {
         self.ppu.tick(cycles, &mut self.interrupt_flags);
         self.apu.tick(cycles);
         self.tick_oam_dma(cycles);
+        self.elapsed_tcycles += u64::from(cycles.0);
     }
 
     /// Starts accounting for CPU bus cycles during one logical CPU step.
@@ -222,27 +283,48 @@ impl Bus {
     /// Fetches an opcode byte for the CPU and advances one machine cycle.
     pub fn cpu_fetch8(&mut self, address: u16) -> u8 {
         let value = self.cpu_read8_during_dma(address);
-        self.cpu_idle_mcycle();
+        self.record_cycle(BusCycleKind::OpcodeFetch, Some(address), Some(value));
+        self.advance_cpu_mcycle();
         value
     }
 
     /// Reads one byte for the CPU and advances one machine cycle.
     pub fn cpu_read8(&mut self, address: u16) -> u8 {
         let value = self.cpu_read8_during_dma(address);
-        self.cpu_idle_mcycle();
+        self.record_cycle(BusCycleKind::Read, Some(address), Some(value));
+        self.advance_cpu_mcycle();
         value
     }
 
     /// Writes one byte for the CPU and advances one machine cycle.
     pub fn cpu_write8(&mut self, address: u16, value: u8) {
         self.cpu_write8_during_dma(address, value);
-        self.cpu_idle_mcycle();
+        self.record_cycle(BusCycleKind::Write, Some(address), Some(value));
+        self.advance_cpu_mcycle();
     }
 
     /// Advances one internal CPU machine cycle without a memory transfer.
     pub fn cpu_idle_mcycle(&mut self) {
+        self.record_cycle(BusCycleKind::Idle, None, None);
+        self.advance_cpu_mcycle();
+    }
+
+    fn advance_cpu_mcycle(&mut self) {
         self.tick(CPU_MACHINE_CYCLE);
         self.clocked_cpu_cycles.0 += CPU_MACHINE_CYCLE.0;
+    }
+
+    /// Returns the accumulated test-only CPU bus-cycle trace without draining it.
+    #[cfg(any(test, feature = "test-trace"))]
+    #[must_use]
+    pub fn cycle_trace(&self) -> &[BusCycleRecord] {
+        &self.cycle_trace
+    }
+
+    /// Drains the accumulated test-only CPU bus-cycle trace.
+    #[cfg(any(test, feature = "test-trace"))]
+    pub fn take_cycle_trace(&mut self) -> Vec<BusCycleRecord> {
+        std::mem::take(&mut self.cycle_trace)
     }
 
     #[must_use]
@@ -322,6 +404,34 @@ impl Bus {
         self.interrupt_flags.clear(interrupt);
     }
 
+    #[cfg(any(test, feature = "test-trace"))]
+    fn record_cycle(&mut self, kind: BusCycleKind, address: Option<u16>, value: Option<u8>) {
+        let (ppu_ly, ppu_mode) = self.ppu.trace_ly_and_mode();
+        let timer = self.timer.trace_state();
+
+        self.cycle_trace.push(BusCycleRecord {
+            tcycle: self.elapsed_tcycles,
+            kind,
+            address,
+            value,
+            state: BusTraceState {
+                ppu_ly,
+                ppu_mode,
+                interrupt_flags: self.interrupt_flags.raw(),
+                interrupt_enable: self.interrupt_enable.raw(),
+                timer_tima: timer.tima,
+                timer_tma: timer.tma,
+                timer_overflow_delay: timer.overflow_delay,
+                dma_active: self.oam_dma.is_active(),
+                dma_next_byte: self.oam_dma.next_byte,
+                dma_startup_mcycles: self.oam_dma.startup_mcycles,
+            },
+        });
+    }
+
+    #[cfg(not(any(test, feature = "test-trace")))]
+    fn record_cycle(&mut self, _kind: BusCycleKind, _address: Option<u16>, _value: Option<u8>) {}
+
     /// Returns the highest-priority interrupt that is both enabled and requested.
     #[must_use]
     pub fn pending_interrupt(&self) -> Option<Interrupt> {
@@ -389,4 +499,89 @@ fn wram_index(address: u16) -> usize {
 
 fn hram_index(address: u16) -> usize {
     usize::from(address - HRAM_START)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Bus, BusCycleKind};
+    use crate::{cartridge::Cartridge, cpu::TCycles, ppu::PpuMode};
+
+    fn test_bus() -> Bus {
+        let mut rom = vec![0; 0x8000];
+        rom[0x0147] = 0x00;
+        rom[0x0148] = 0x00;
+        rom[0x0149] = 0x00;
+        rom[0x014D] = header_checksum(&rom);
+
+        Bus::new(Cartridge::from_bytes(rom).expect("minimal ROM should load"))
+    }
+
+    fn header_checksum(rom: &[u8]) -> u8 {
+        rom[0x0134..=0x014C].iter().fold(0_u8, |checksum, byte| {
+            checksum.wrapping_sub(*byte).wrapping_sub(1)
+        })
+    }
+
+    #[test]
+    fn cycle_trace_records_ordered_cpu_cycles_and_hardware_snapshots() {
+        let mut bus = test_bus();
+        bus.write8(0xFF05, 0xFF);
+        bus.write8(0xFF06, 0x42);
+        bus.write8(0xFF07, 0x05);
+
+        for _ in 0..4 {
+            bus.cpu_idle_mcycle();
+        }
+        bus.cpu_write8(0xFF46, 0xC0);
+        let _ = bus.cpu_fetch8(0x0100);
+
+        let trace = bus.take_cycle_trace();
+        assert_eq!(
+            trace.len(),
+            6,
+            "each CPU machine cycle should have one record"
+        );
+        assert_eq!(
+            trace.iter().map(|record| record.tcycle).collect::<Vec<_>>(),
+            vec![0, 4, 8, 12, 16, 20],
+            "trace times should identify the first differing machine cycle"
+        );
+        assert_eq!(trace[0].kind, BusCycleKind::Idle);
+        assert_eq!(trace[4].kind, BusCycleKind::Write);
+        assert_eq!(trace[4].address, Some(0xFF46));
+        assert_eq!(trace[4].value, Some(0xC0));
+        assert!(
+            trace[4].state.dma_active,
+            "FF46 write should be visible in its trace record"
+        );
+        assert_eq!(trace[4].state.dma_startup_mcycles, 2);
+        assert_eq!(trace[5].kind, BusCycleKind::OpcodeFetch);
+        assert_eq!(trace[4].state.timer_tima, 0x00);
+        assert_eq!(trace[4].state.timer_tma, 0x42);
+        assert_eq!(trace[4].state.timer_overflow_delay, Some(4));
+        assert_eq!(trace[4].state.interrupt_flags, 0x00);
+        assert_eq!(trace[5].state.timer_tima, 0x42);
+        assert_eq!(trace[5].state.timer_overflow_delay, None);
+        assert_eq!(trace[5].state.interrupt_flags, 0x04);
+        assert_eq!(trace[5].state.interrupt_enable, 0x00);
+        assert_eq!(trace[5].state.ppu_ly, 0);
+        assert_eq!(trace[5].state.ppu_mode, PpuMode::OamSearch);
+    }
+
+    #[test]
+    fn cycle_trace_time_includes_untraced_bus_ticks() {
+        let mut bus = test_bus();
+        bus.tick(TCycles(12));
+        bus.cpu_read8(0xC000);
+
+        let trace = bus.take_cycle_trace();
+        assert_eq!(trace.len(), 1);
+        assert_eq!(
+            trace[0].tcycle, 12,
+            "direct bus ticking must retain monotonic trace time"
+        );
+        assert_eq!(trace[0].kind, BusCycleKind::Read);
+        assert_eq!(trace[0].address, Some(0xC000));
+        assert_eq!(trace[0].value, Some(0));
+    }
 }

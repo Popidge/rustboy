@@ -74,6 +74,19 @@ Use golden outputs when a compact trace is more useful than many isolated assert
 
 Golden output should be short and reviewed. Avoid large files that hide the behavioural reason for a failure.
 
+### Bus-cycle trace tests
+
+Accuracy work should expose a deterministic, test-only bus trace before making
+large timing changes. A trace record should be compact but sufficient to locate
+the first hardware-order divergence: DMG T-cycle, CPU bus-cycle kind, address,
+value or write data, and relevant state such as LY/mode, IF/IE, timer reload,
+and DMA state. Keep trace collection out of normal frontend output and avoid
+making it a permanent cross-component reference graph.
+
+Use short reviewed trace goldens for CPU, timer, DMA, and interrupt edge cases.
+The first mismatching record is the diagnostic target; a later framebuffer or
+serial mismatch is only a symptom.
+
 ### Visual tests
 
 PPU tests should start with data-level assertions:
@@ -97,6 +110,10 @@ Choose a small set that matches the subsystem being changed:
 * Interrupts and HALT: Blargg `halt_bug`, AGE halt tests, and Mooneye interrupt timing tests.
 * DMA: Mooneye `oam_dma_*`, Blargg memory timing, and GBMicrotest DMA cases.
 * PPU bus access and STAT: AGE `vram`, `oam`, `stat`, and GBMicrotest PPU/STAT cases.
+* Serial: focused generated-ROM tests first, then applicable Blargg/Mooneye
+  serial and interrupt cases.
+* Boot: unit tests for mapping and FF50, plus an optional user-provided ROM
+  smoke test; boot-ROM bytes must never be a required committed fixture.
 
 Record the exact ROM gates used in the milestone entry. If a gate remains
 failing, record the observed failure and the next suspected hardware rule.

@@ -90,6 +90,18 @@ it useful.
 
 The bus is responsible for applying time to owned hardware components.
 
+The selected implementation strategy is a simple dispatcher that advances one
+DMG T-cycle at a time. `Bus` owns the monotonically increasing T-cycle counter
+and clocks its owned timer, PPU, APU, DMA engine, and future serial transfer in
+a documented order. This intentionally favours inspectable correctness over a
+deadline/event scheduler. A future optimisation may skip to a known next event,
+but only if it preserves the same observable one-T-cycle semantics and trace.
+
+The CPU does not tick components directly. It asks `Bus` to perform fetch,
+read, write, or idle machine cycles; `Bus` applies arbitration and runs the
+dispatcher. Components communicate interrupt requests through temporary mutable
+access or returned events, never stored references.
+
 During a CPU machine cycle, the bus should advance:
 
 * Timer
@@ -134,6 +146,10 @@ immediately. The DMA engine should track:
 The CPU should continue executing through the bus. The bus decides what reads
 and writes return during DMA.
 
+For DMG accuracy, the completed model must restrict active-DMA CPU access to
+HRAM rather than only protecting OAM. Any source-specific DMA bus conflicts and
+restart timing also belong to `Bus` arbitration, not to CPU instruction code.
+
 ## PPU Direction
 
 The current scanline renderer is a useful framebuffer model, but PPU timing work
@@ -161,6 +177,17 @@ Interrupt servicing should be expressed as ordered CPU cycles:
 
 HALT, EI/DI delay, and pending interrupt wake behaviour should remain explicit
 CPU state, but their timing should be validated against the clocked bus model.
+
+STOP remains a DMG concern even though CGB speed switching is out of scope. The
+DMG model must distinguish STOP from HALT and model its documented wake sources.
+
+## Boot And Reset Direction
+
+Post-boot register seeding remains a supported fast-start mode. A separate,
+optional boot path may accept a user-supplied 256-byte DMG boot ROM, overlay it
+at `0000..=00FF`, and unmap it when software writes `FF50`. The project must
+not distribute, embed, or build boot-ROM bytes. Boot-ROM support should begin
+only after the bus dispatcher and reset sequencing are testable.
 
 ## Test Gates
 

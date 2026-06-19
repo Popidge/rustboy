@@ -164,6 +164,12 @@ impl Ppu {
         }
     }
 
+    #[cfg(any(test, feature = "test-trace"))]
+    #[must_use]
+    pub(crate) fn trace_ly_and_mode(&self) -> (u8, PpuMode) {
+        (self.ly, self.mode)
+    }
+
     #[must_use]
     pub fn framebuffer(&self) -> &[u32; FRAMEBUFFER_PIXELS] {
         &self.framebuffer

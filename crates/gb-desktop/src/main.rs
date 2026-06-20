@@ -497,6 +497,13 @@ impl DisplaySource {
                 eprintln!("failed to save RAM to {}: {error}", save_path.display());
             }
         }
+
+        if let Some(rtc) = game_boy.save_rtc() {
+            let rtc_path = rtc_path_for_save(save_path);
+            if let Err(error) = fs::write(&rtc_path, rtc) {
+                eprintln!("failed to save RTC to {}: {error}", rtc_path.display());
+            }
+        }
     }
 }
 
@@ -1751,13 +1758,22 @@ fn save_path_for_rom(rom_path: &Path) -> PathBuf {
     rom_path.with_extension("sav")
 }
 
+fn rtc_path_for_save(save_path: &Path) -> PathBuf {
+    save_path.with_extension("rtc")
+}
+
 fn load_save_if_present(game_boy: &mut GameBoy, save_path: &Path) -> Result<(), Box<dyn Error>> {
-    if game_boy.save_ram().is_none() || !save_path.exists() {
-        return Ok(());
+    if game_boy.save_ram().is_some() && save_path.exists() {
+        let save = fs::read(save_path)?;
+        game_boy.load_save_ram(&save)?;
     }
 
-    let save = fs::read(save_path)?;
-    game_boy.load_save_ram(&save)?;
+    let rtc_path = rtc_path_for_save(save_path);
+    if game_boy.save_rtc().is_some() && rtc_path.exists() {
+        let rtc = fs::read(rtc_path)?;
+        game_boy.load_save_rtc(&rtc)?;
+    }
+
     Ok(())
 }
 
@@ -1817,6 +1833,14 @@ fn copy_framebuffer(source: &[u32], target: &mut [u8]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rtc_sidecar_uses_the_save_file_stem() {
+        assert_eq!(
+            rtc_path_for_save(Path::new("games/tetris.sav")),
+            PathBuf::from("games/tetris.rtc")
+        );
+    }
 
     fn minimal_cartridge_with_entry(entry: &[u8]) -> Cartridge {
         let mut rom = vec![0; 0x8000];

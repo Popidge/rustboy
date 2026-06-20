@@ -333,8 +333,8 @@ impl Bus {
 
     /// Advances bus-owned hardware components by the given T-cycles.
     ///
-    /// Every iteration is one DMG T-cycle. Hardware advances in timer, PPU,
-    /// APU, OAM-DMA, then Serial order; interrupt requests raised by an earlier
+    /// Every iteration is one DMG T-cycle. Hardware advances in cartridge RTC,
+    /// timer, PPU, APU, OAM-DMA, then Serial order; interrupt requests raised by an earlier
     /// stage are visible to the stages that follow. CPU code reaches this
     /// dispatcher only through the clocked CPU bus helpers below.
     pub fn tick(&mut self, cycles: TCycles) {
@@ -389,6 +389,8 @@ impl Bus {
     }
 
     fn tick_tcycle(&mut self) {
+        self.cartridge.tick(TCycles(1));
+
         self.timer.tick(TCycles(1), &mut self.interrupt_flags);
         self.record_tcycle_stage(BusDispatchStage::Timer);
 
@@ -493,6 +495,18 @@ impl Bus {
     /// cartridge.
     pub fn load_save_ram(&mut self, data: &[u8]) -> Result<(), crate::cartridge::SaveRamError> {
         self.cartridge.load_save_ram(data)
+    }
+
+    #[must_use]
+    pub fn save_rtc(&self) -> Option<[u8; 22]> {
+        self.cartridge.save_rtc()
+    }
+
+    /// # Errors
+    ///
+    /// Returns an error when the cartridge has no RTC or the sidecar is invalid.
+    pub fn load_save_rtc(&mut self, data: &[u8]) -> Result<(), crate::cartridge::SaveRtcError> {
+        self.cartridge.load_save_rtc(data)
     }
 
     /// Returns the raw interrupt flags register storage.

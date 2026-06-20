@@ -14,7 +14,7 @@ pub mod timer;
 use apu::StereoSample;
 use boot_rom::{BootRomError, DmgBootRom};
 use bus::Bus;
-use cartridge::{Cartridge, CartridgeError, SaveRamError};
+use cartridge::{Cartridge, CartridgeError, SaveRamError, SaveRtcError};
 use cpu::{Cpu, CpuError, CpuRegisters, TCycles};
 use joypad::Button;
 use ppu::FRAMEBUFFER_PIXELS;
@@ -172,6 +172,21 @@ impl GameBoy {
     /// cartridge.
     pub fn load_save_ram(&mut self, data: &[u8]) -> Result<(), SaveRamError> {
         self.bus.load_save_ram(data)
+    }
+
+    /// Returns an MBC3 RTC sidecar when the cartridge has a battery-backed timer.
+    #[must_use]
+    pub fn save_rtc(&self) -> Option<[u8; 22]> {
+        self.bus.save_rtc()
+    }
+
+    /// Restores the MBC3 RTC sidecar associated with this cartridge.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the cartridge has no RTC or the sidecar is invalid.
+    pub fn load_save_rtc(&mut self, data: &[u8]) -> Result<(), SaveRtcError> {
+        self.bus.load_save_rtc(data)
     }
 }
 

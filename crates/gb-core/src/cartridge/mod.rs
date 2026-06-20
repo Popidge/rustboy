@@ -12,11 +12,17 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
+use crate::cpu::TCycles;
+
 const ROM_ADDRESS_END: u16 = 0x7FFF;
 const ROM_BANK_SIZE: usize = 0x4000;
 const RAM_BANK_SIZE: usize = 0x2000;
 const MBC2_RAM_SIZE: usize = 512;
 const MBC30_ACCESSIBLE_RAM_SIZE: usize = 64 * 1024;
+const RTC_SAVE_MAGIC: [u8; 4] = *b"RBRT";
+const RTC_SAVE_VERSION: u8 = 3;
+const RTC_SAVE_SIZE: usize = 22;
+const DMG_TCYCLES_PER_SECOND: u64 = 4_194_304;
 
 /// A loaded Game Boy cartridge ROM.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -43,14 +49,15 @@ enum BankingMode {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Rtc {
-    offset_seconds: i64,
+    registers: RtcRegisters,
+    subsecond_tcycles: u32,
     halted: bool,
     day_carry: bool,
     latched: Option<RtcRegisters>,
     latch_previous: u8,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 struct RtcRegisters {
     seconds: u8,
     minutes: u8,
@@ -221,6 +228,13 @@ impl Cartridge {
         }
     }
 
+    /// Advances cartridge-owned hardware by DMG T-cycles.
+    pub fn tick(&mut self, cycles: TCycles) {
+        if self.header.cartridge_type().has_rtc() {
+            self.rtc.tick(cycles);
+        }
+    }
+
     #[must_use]
     pub fn read_ram(&self, address: u16) -> u8 {
         if !(0xA000..=0xBFFF).contains(&address) || !self.ram_enabled {
@@ -228,13 +242,18 @@ impl Cartridge {
         }
 
         let cartridge_type = self.header.cartridge_type();
-        if cartridge_type.is_mbc3() && (0x08..=0x0C).contains(&self.mbc3_ram_or_rtc_select) {
+        if cartridge_type.has_rtc() && (0x08..=0x0C).contains(&self.mbc3_ram_or_rtc_select) {
             return self.rtc.read(self.mbc3_ram_or_rtc_select);
+        }
+        if cartridge_type.is_mbc3() && self.mbc3_ram_or_rtc_select > 0x03 {
+            return 0xFF;
         }
         if self.ram.is_empty() {
             return 0xFF;
         }
         if cartridge_type.is_mbc2() {
+            // The 512 four-bit cells repeat throughout the cartridge RAM
+            // window; only the low nine address bits reach the internal RAM.
             let index = usize::from(address - 0xA000) & 0x01FF;
             return 0xF0 | (self.ram[index] & 0x0F);
         }
@@ -249,8 +268,11 @@ impl Cartridge {
         }
 
         let cartridge_type = self.header.cartridge_type();
-        if cartridge_type.is_mbc3() && (0x08..=0x0C).contains(&self.mbc3_ram_or_rtc_select) {
+        if cartridge_type.has_rtc() && (0x08..=0x0C).contains(&self.mbc3_ram_or_rtc_select) {
             self.rtc.write(self.mbc3_ram_or_rtc_select, value);
+            return;
+        }
+        if cartridge_type.is_mbc3() && self.mbc3_ram_or_rtc_select > 0x03 {
             return;
         }
         if self.ram.is_empty() {
@@ -298,6 +320,33 @@ impl Cartridge {
 
         self.ram.copy_from_slice(data);
         Ok(())
+    }
+
+    /// Returns a versioned RTC sidecar for a battery-backed MBC3 timer cartridge.
+    ///
+    /// Save RAM stays raw for compatibility with existing `.sav` files. The RTC
+    /// has independent state, so frontends should store this value in a separate
+    /// sidecar and restore it with [`Self::load_save_rtc`].
+    #[must_use]
+    pub fn save_rtc(&self) -> Option<[u8; RTC_SAVE_SIZE]> {
+        self.header
+            .cartridge_type()
+            .has_rtc()
+            .then(|| self.rtc.save())
+    }
+
+    /// Restores a versioned RTC sidecar for a battery-backed MBC3 timer cartridge.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SaveRtcError`] when this cartridge has no RTC or `data` is not
+    /// a compatible sidecar.
+    pub fn load_save_rtc(&mut self, data: &[u8]) -> Result<(), SaveRtcError> {
+        if !self.header.cartridge_type().has_rtc() {
+            return Err(SaveRtcError::NoRtc);
+        }
+
+        self.rtc.load(data)
     }
 
     fn mbc1_fixed_bank(&self) -> usize {
@@ -371,7 +420,7 @@ impl Cartridge {
                 self.mbc3_rom_bank = if bank == 0 { 1 } else { bank };
             }
             0x4000..=0x5FFF => self.mbc3_ram_or_rtc_select = value,
-            0x6000..=0x7FFF => self.rtc.latch(value),
+            0x6000..=0x7FFF if self.header.cartridge_type().has_rtc() => self.rtc.latch(value),
             _ => {}
         }
     }
@@ -419,7 +468,8 @@ fn cartridge_ram_size(cartridge_type: CartridgeType, ram_size: RamSize) -> usize
 impl Rtc {
     fn new() -> Self {
         Self {
-            offset_seconds: 0,
+            registers: RtcRegisters::default(),
+            subsecond_tcycles: 0,
             halted: false,
             day_carry: false,
             latched: None,
@@ -428,7 +478,7 @@ impl Rtc {
     }
 
     fn read(&self, register: u8) -> u8 {
-        let registers = self.current_registers();
+        let registers = self.latched.unwrap_or_else(|| self.live_registers());
         match register {
             0x08 => registers.seconds,
             0x09 => registers.minutes,
@@ -440,95 +490,181 @@ impl Rtc {
     }
 
     fn write(&mut self, register: u8, value: u8) {
-        let mut registers = self.current_registers();
         match register {
-            0x08 => registers.seconds = value.min(59),
-            0x09 => registers.minutes = value.min(59),
-            0x0A => registers.hours = value.min(23),
-            0x0B => registers.day_low = value,
-            0x0C => {
-                registers.day_high = value & 0xC1;
-                self.day_carry = value & 0x80 != 0;
-                let was_halted = self.halted;
-                self.halted = value & 0x40 != 0;
-                if self.halted {
-                    self.latched = Some(registers);
-                    return;
-                }
-                if was_halted {
-                    self.set_time(registers);
-                    self.latched = None;
-                    return;
-                }
+            // Only an RTC-seconds write restarts the sub-second divider. The
+            // other four register writes retain their distance to the next tick.
+            0x08 => {
+                self.registers.seconds = value & 0x3F;
+                self.subsecond_tcycles = 0;
             }
-            _ => return,
-        }
-
-        self.set_time(registers);
-        if self.halted {
-            self.latched = Some(registers);
+            0x09 => self.registers.minutes = value & 0x3F,
+            0x0A => self.registers.hours = value & 0x1F,
+            0x0B => self.registers.day_low = value,
+            0x0C => {
+                self.registers.day_high = value & 0xC1;
+                self.day_carry = value & 0x80 != 0;
+                self.halted = value & 0x40 != 0;
+            }
+            _ => {}
         }
     }
 
     fn latch(&mut self, value: u8) {
         if self.latch_previous == 0 && value == 1 {
-            self.latched = Some(self.current_registers());
+            self.latched = Some(self.live_registers());
         }
         self.latch_previous = value;
     }
 
-    fn current_registers(&self) -> RtcRegisters {
+    fn live_registers(&self) -> RtcRegisters {
+        self.registers_from_state()
+    }
+
+    fn tick(&mut self, cycles: TCycles) {
         if self.halted {
-            return self.latched.unwrap_or_else(|| self.registers_from_total(0));
+            return;
         }
 
-        self.latched.unwrap_or_else(|| {
-            let total = host_seconds().saturating_add(self.offset_seconds);
-            self.registers_from_total(u64::try_from(total.max(0)).unwrap_or(0))
-        })
+        let elapsed = u64::from(self.subsecond_tcycles) + u64::from(cycles.0);
+        self.tick_seconds(elapsed / DMG_TCYCLES_PER_SECOND);
+        self.subsecond_tcycles = u32::try_from(elapsed % DMG_TCYCLES_PER_SECOND)
+            .expect("RTC sub-second T-cycle remainder fits u32");
     }
 
-    fn set_time(&mut self, registers: RtcRegisters) {
-        let target = i64::try_from(registers.total_seconds()).unwrap_or(i64::MAX);
-        self.offset_seconds = target.saturating_sub(host_seconds());
+    fn apply_elapsed_wall_time(&mut self, elapsed_millis: u64) {
+        if self.halted {
+            return;
+        }
+
+        self.tick_seconds(elapsed_millis / 1_000);
+        let fractional_tcycles = elapsed_millis % 1_000 * DMG_TCYCLES_PER_SECOND / 1_000;
+        self.tick(TCycles(
+            u32::try_from(fractional_tcycles).expect("fractional RTC T-cycles fit u32"),
+        ));
     }
 
-    fn registers_from_total(&self, total_seconds: u64) -> RtcRegisters {
-        let seconds = (total_seconds % 60) as u8;
-        let minutes = ((total_seconds / 60) % 60) as u8;
-        let hours = ((total_seconds / 3600) % 24) as u8;
-        let days = total_seconds / 86_400;
-        let day_low = (days & 0xFF) as u8;
-        let day_bit = ((days >> 8) & 0x01) as u8;
-        let carry = self.day_carry || days > 511;
-        let day_high = day_bit | (u8::from(self.halted) << 6) | (u8::from(carry) << 7);
+    fn tick_seconds(&mut self, ticks: u64) {
+        for _ in 0..ticks {
+            self.tick_second();
+        }
+    }
 
+    fn tick_second(&mut self) {
+        if self.registers.seconds == 59 {
+            self.registers.seconds = 0;
+            self.tick_minute();
+        } else if self.registers.seconds == 63 {
+            self.registers.seconds = 0;
+        } else {
+            self.registers.seconds += 1;
+        }
+    }
+
+    fn tick_minute(&mut self) {
+        if self.registers.minutes == 59 {
+            self.registers.minutes = 0;
+            self.tick_hour();
+        } else if self.registers.minutes == 63 {
+            self.registers.minutes = 0;
+        } else {
+            self.registers.minutes += 1;
+        }
+    }
+
+    fn tick_hour(&mut self) {
+        if self.registers.hours == 23 {
+            self.registers.hours = 0;
+            self.tick_day();
+        } else if self.registers.hours == 31 {
+            self.registers.hours = 0;
+        } else {
+            self.registers.hours += 1;
+        }
+    }
+
+    fn tick_day(&mut self) {
+        let day =
+            u16::from(self.registers.day_low) | (u16::from(self.registers.day_high & 0x01) << 8);
+        let next_day = day.wrapping_add(1);
+        self.registers.day_low = u8::try_from(next_day & 0x00FF).expect("day low byte fits u8");
+        self.registers.day_high =
+            (self.registers.day_high & !0x01) | u8::from(next_day & 0x0100 != 0);
+        if next_day > 511 {
+            self.registers.day_low = 0;
+            self.registers.day_high &= !0x01;
+            self.day_carry = true;
+        }
+    }
+
+    fn registers_from_state(&self) -> RtcRegisters {
         RtcRegisters {
-            seconds,
-            minutes,
-            hours,
-            day_low,
-            day_high,
+            seconds: self.registers.seconds,
+            minutes: self.registers.minutes,
+            hours: self.registers.hours,
+            day_low: self.registers.day_low,
+            day_high: (self.registers.day_high & 0x01)
+                | (u8::from(self.halted) << 6)
+                | (u8::from(self.day_carry) << 7),
         }
     }
-}
 
-impl RtcRegisters {
-    fn total_seconds(self) -> u64 {
-        let days = u64::from(self.day_low) | (u64::from(self.day_high & 0x01) << 8);
+    fn save(&self) -> [u8; RTC_SAVE_SIZE] {
+        let registers = self.registers_from_state();
+        let mut data = [0; RTC_SAVE_SIZE];
+        data[..4].copy_from_slice(&RTC_SAVE_MAGIC);
+        data[4] = RTC_SAVE_VERSION;
+        data[5] = registers.seconds;
+        data[6] = registers.minutes;
+        data[7] = registers.hours;
+        data[8] = registers.day_low;
+        data[9] = registers.day_high;
+        data[10..14].copy_from_slice(&self.subsecond_tcycles.to_le_bytes());
+        data[14..].copy_from_slice(&host_millis().to_le_bytes());
+        data
+    }
 
-        days * 86_400
-            + u64::from(self.hours.min(23)) * 3600
-            + u64::from(self.minutes.min(59)) * 60
-            + u64::from(self.seconds.min(59))
+    fn load(&mut self, data: &[u8]) -> Result<(), SaveRtcError> {
+        if data.len() != RTC_SAVE_SIZE {
+            return Err(SaveRtcError::WrongLength {
+                expected: RTC_SAVE_SIZE,
+                actual: data.len(),
+            });
+        }
+        if data[..4] != RTC_SAVE_MAGIC || data[4] != RTC_SAVE_VERSION {
+            return Err(SaveRtcError::InvalidFormat);
+        }
+
+        let registers = RtcRegisters {
+            seconds: data[5] & 0x3F,
+            minutes: data[6] & 0x3F,
+            hours: data[7] & 0x1F,
+            day_low: data[8],
+            day_high: data[9] & 0xC1,
+        };
+        self.registers = registers;
+        self.subsecond_tcycles =
+            u32::from_le_bytes(data[10..14].try_into().expect("RTC phase length is fixed"));
+        let saved_at_millis = i64::from_le_bytes(
+            data[14..]
+                .try_into()
+                .expect("RTC timestamp length is fixed"),
+        );
+        self.halted = registers.day_high & 0x40 != 0;
+        self.day_carry = registers.day_high & 0x80 != 0;
+        self.latched = None;
+        self.latch_previous = 0;
+        self.apply_elapsed_wall_time(
+            u64::try_from(host_millis().saturating_sub(saved_at_millis)).unwrap_or(0),
+        );
+        Ok(())
     }
 }
 
-fn host_seconds() -> i64 {
+fn host_millis() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |duration| {
-            i64::try_from(duration.as_secs()).unwrap_or(i64::MAX)
+            i64::try_from(duration.as_millis()).unwrap_or(i64::MAX)
         })
 }
 
@@ -536,6 +672,14 @@ fn host_seconds() -> i64 {
 pub enum SaveRamError {
     NoExternalRam,
     WrongLength { expected: usize, actual: usize },
+}
+
+/// Errors returned while restoring a persisted MBC3 RTC sidecar.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SaveRtcError {
+    NoRtc,
+    WrongLength { expected: usize, actual: usize },
+    InvalidFormat,
 }
 
 impl fmt::Display for SaveRamError {
@@ -551,6 +695,21 @@ impl fmt::Display for SaveRamError {
 }
 
 impl Error for SaveRamError {}
+
+impl fmt::Display for SaveRtcError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NoRtc => formatter.write_str("cartridge has no MBC3 RTC"),
+            Self::WrongLength { expected, actual } => write!(
+                formatter,
+                "RTC save length mismatch: expected {expected} bytes, got {actual}"
+            ),
+            Self::InvalidFormat => formatter.write_str("invalid RTC save format"),
+        }
+    }
+}
+
+impl Error for SaveRtcError {}
 
 impl fmt::Display for CartridgeError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -590,9 +749,11 @@ impl Error for CartridgeReadError {}
 
 #[cfg(test)]
 mod tests {
+    use crate::cpu::TCycles;
+
     use super::{
         header::calculate_header_checksum, Cartridge, CartridgeError, CartridgeReadError,
-        SaveRamError, RAM_BANK_SIZE, ROM_BANK_SIZE,
+        RtcRegisters, SaveRamError, SaveRtcError, RAM_BANK_SIZE, ROM_BANK_SIZE,
     };
 
     const ROM_SIZE: usize = 32 * 1024;
@@ -899,6 +1060,24 @@ mod tests {
     }
 
     #[test]
+    fn mbc1_forbidden_switchable_banks_remap_to_the_next_bank() {
+        let rom = fake_banked_rom(b"MBC1BANK", 0x01, 0x06, 0x00, 128);
+        let mut cartridge = Cartridge::from_bytes(rom).expect("MBC1 header should parse");
+
+        for (upper_bits, expected_bank) in [(1, 0x21), (2, 0x41), (3, 0x61)] {
+            cartridge.write_rom(0x4000, upper_bits);
+            cartridge.write_rom(0x2000, 0x00);
+
+            assert_eq!(
+                cartridge.read_rom(0x4000),
+                Ok(expected_bank),
+                "MBC1 bank 0x{expected_bank:02X} must replace forbidden bank 0x{:02X}",
+                upper_bits << 5
+            );
+        }
+    }
+
+    #[test]
     fn mbc1_small_roms_mirror_unavailable_upper_bank_bits() {
         let rom = fake_banked_rom(b"MBC1SMALL", 0x01, 0x01, 0x00, 4);
         let mut cartridge = Cartridge::from_bytes(rom).expect("MBC1 header should parse");
@@ -1042,6 +1221,27 @@ mod tests {
     }
 
     #[test]
+    fn mbc2_ram_mirrors_its_512_nibbles_through_the_ram_window() {
+        let rom = fake_banked_rom(b"MBC2", 0x06, 0x02, 0x00, 16);
+        let mut cartridge = Cartridge::from_bytes(rom).expect("MBC2 header should parse");
+        cartridge.write_rom(0x0000, 0x0A);
+
+        cartridge.write_ram(0xA000, 0x05);
+        cartridge.write_ram(0xA200, 0x0C);
+
+        assert_eq!(
+            cartridge.read_ram(0xA200),
+            0xFC,
+            "only the low nine address bits reach MBC2's 512 internal nibble cells"
+        );
+        assert_eq!(
+            cartridge.read_ram(0xA000),
+            0xFC,
+            "mirrored writes update the same internal MBC2 nibble cell"
+        );
+    }
+
+    #[test]
     fn mbc3_banks_rom_ram_and_rtc_registers() {
         let rom = fake_banked_rom(b"MBC3RTC", 0x10, 0x03, 0x03, 8);
         let mut cartridge = Cartridge::from_bytes(rom).expect("MBC3 header should parse");
@@ -1071,6 +1271,161 @@ mod tests {
         assert_eq!(cartridge.read_ram(0xA000), 34);
         cartridge.write_rom(0x4000, 0x0A);
         assert_eq!(cartridge.read_ram(0xA000), 5);
+    }
+
+    #[test]
+    fn mbc3_without_a_timer_does_not_expose_rtc_registers() {
+        let rom = fake_banked_rom(b"MBC3RAM", 0x13, 0x03, 0x03, 8);
+        let mut cartridge = Cartridge::from_bytes(rom).expect("MBC3 header should parse");
+        cartridge.write_rom(0x0000, 0x0A);
+        cartridge.write_rom(0x4000, 0x08);
+        cartridge.write_ram(0xA000, 12);
+
+        assert_eq!(
+            cartridge.read_ram(0xA000),
+            0xFF,
+            "only timer-equipped MBC3 cartridges decode RTC register selections"
+        );
+    }
+
+    #[test]
+    fn mbc3_latch_freezes_a_snapshot_without_stopping_the_live_clock() {
+        let rom = fake_banked_rom(b"MBC3RTC", 0x10, 0x03, 0x03, 8);
+        let mut cartridge = Cartridge::from_bytes(rom).expect("MBC3 header should parse");
+        cartridge.write_rom(0x0000, 0x0A);
+        cartridge.write_rom(0x4000, 0x08);
+        cartridge.rtc.registers.seconds = 10;
+
+        cartridge.write_rom(0x6000, 0x00);
+        cartridge.write_rom(0x6000, 0x01);
+        cartridge.rtc.registers.seconds = 15;
+
+        assert_eq!(
+            cartridge.read_ram(0xA000),
+            10,
+            "latched seconds should remain stable"
+        );
+
+        cartridge.write_rom(0x6000, 0x00);
+        cartridge.write_rom(0x6000, 0x01);
+        assert_eq!(
+            cartridge.read_ram(0xA000),
+            15,
+            "a new 0-to-1 latch captures live time"
+        );
+    }
+
+    #[test]
+    fn mbc3_rtc_halt_and_day_carry_are_separate_control_bits() {
+        let rom = fake_banked_rom(b"MBC3RTC", 0x10, 0x03, 0x03, 8);
+        let mut cartridge = Cartridge::from_bytes(rom).expect("MBC3 header should parse");
+        cartridge.write_rom(0x0000, 0x0A);
+        cartridge.write_rom(0x4000, 0x0C);
+        cartridge.write_ram(0xA000, 0x40);
+        assert!(cartridge.rtc.halted, "day-high bit 6 halts the RTC");
+
+        cartridge.write_ram(0xA000, 0x80);
+        assert!(!cartridge.rtc.halted, "clearing bit 6 resumes the RTC");
+        assert!(
+            cartridge.rtc.day_carry,
+            "day-high bit 7 controls the carry latch"
+        );
+
+        cartridge.rtc.registers.day_low = 0;
+        cartridge.rtc.registers.day_high = 0;
+        cartridge.rtc.day_carry = true;
+        assert_eq!(
+            cartridge.read_ram(0xA000) & 0x81,
+            0x80,
+            "the 9-bit day counter wraps and raises carry after day 511"
+        );
+    }
+
+    #[test]
+    fn mbc3_rtc_keeps_raw_register_ranges_and_invalid_rollovers() {
+        let rom = fake_banked_rom(b"MBC3RTC", 0x10, 0x03, 0x03, 8);
+        let mut cartridge = Cartridge::from_bytes(rom).expect("MBC3 header should parse");
+        cartridge.write_rom(0x0000, 0x0A);
+
+        for (select, value, expected) in
+            [(0x08, 0xFF, 0x3F), (0x09, 0xFF, 0x3F), (0x0A, 0xFF, 0x1F)]
+        {
+            cartridge.write_rom(0x4000, select);
+            cartridge.write_ram(0xA000, value);
+            assert_eq!(cartridge.read_ram(0xA000), expected);
+        }
+
+        cartridge.rtc.registers.seconds = 63;
+        cartridge.rtc.registers.minutes = 17;
+        cartridge.rtc.tick_second();
+        assert_eq!(cartridge.rtc.registers.seconds, 0);
+        assert_eq!(
+            cartridge.rtc.registers.minutes, 17,
+            "an invalid seconds rollover does not increment minutes"
+        );
+    }
+
+    #[test]
+    fn mbc3_only_seconds_writes_reset_the_subsecond_phase() {
+        let mut rtc = super::Rtc::new();
+        rtc.subsecond_tcycles = 900;
+        rtc.write(0x09, 12);
+        assert_eq!(rtc.subsecond_tcycles, 900);
+
+        rtc.write(0x08, 12);
+        assert_eq!(rtc.subsecond_tcycles, 0);
+    }
+
+    #[test]
+    fn mbc3_rtc_advances_from_bus_tcycles_and_respects_halt() {
+        let rom = fake_banked_rom(b"MBC3RTC", 0x10, 0x03, 0x03, 8);
+        let mut cartridge = Cartridge::from_bytes(rom).expect("MBC3 header should parse");
+        cartridge.tick(TCycles(4_194_304));
+        assert_eq!(cartridge.rtc.registers.seconds, 1);
+
+        cartridge.rtc.halted = true;
+        cartridge.tick(TCycles(4_194_304));
+        assert_eq!(
+            cartridge.rtc.registers.seconds, 1,
+            "a halted RTC must not advance when the bus continues ticking"
+        );
+    }
+
+    #[test]
+    fn mbc3_rtc_sidecar_is_available_without_external_ram() {
+        let rom = fake_banked_rom(b"MBC3RTC", 0x0F, 0x03, 0x00, 8);
+        let mut cartridge =
+            Cartridge::from_bytes(rom.clone()).expect("MBC3 timer header should parse");
+        cartridge.rtc.registers = RtcRegisters {
+            seconds: 45,
+            minutes: 25,
+            hours: 3,
+            day_low: 0,
+            day_high: 0,
+        };
+        let save = cartridge
+            .save_rtc()
+            .expect("timer cartridge should export an RTC sidecar");
+
+        assert!(
+            cartridge.save_ram().is_none(),
+            "timer-only cartridges have no raw RAM save"
+        );
+
+        let mut restored = Cartridge::from_bytes(rom).expect("MBC3 timer header should parse");
+        restored
+            .load_save_rtc(&save)
+            .expect("valid RTC sidecar should restore");
+        assert_eq!(restored.rtc.registers.seconds, 45);
+        assert_eq!(restored.rtc.registers.minutes, 25);
+        assert_eq!(restored.rtc.registers.hours, 3);
+        assert_eq!(
+            restored.load_save_rtc(&[0; 1]),
+            Err(SaveRtcError::WrongLength {
+                expected: 22,
+                actual: 1
+            })
+        );
     }
 
     #[test]

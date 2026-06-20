@@ -1,5 +1,56 @@
 # Milestones
 
+## 0056: Close mapper and RTC DMG edge cases
+
+Date: 2026-06-20
+
+Status: Partial
+
+### Goal
+
+Make the supported cartridge mappers and MBC3 real-time clock behave as DMG
+hardware, including persistence separate from battery RAM.
+
+### Changes
+
+- Documented and covered MBC1's forbidden switchable banks (`20h`, `40h`, and
+  `60h`) mapping to the following bank.
+- Kept MBC2's 512 four-bit RAM cells, high-nibble reads, and mirrored
+  nine-address-bit aperture explicit.
+- Restricted MBC3 RTC selection/latching to timer-equipped cartridges; made
+  RTC latches snapshots rather than stopping the live clock; modelled halt and
+  day-carry bits independently.
+- Moved RTC advancement into the Bus T-cycle dispatcher, with raw MBC3
+  register ranges, invalid-value rollover behaviour, and seconds-write phase
+  reset modelled explicitly.
+- Added a compact versioned `.rtc` sidecar for MBC3 timer state. Desktop keeps
+  raw `.sav` RAM compatibility and loads/saves the RTC sidecar independently.
+
+### Tests
+
+- `cargo fmt`
+- `cargo test` (all passed)
+- `cargo clippy --all-targets --all-features` (passed)
+- Passed local gates: Mooneye `mbc1/rom_512kb` and `mbc2/ram`; Mealybug
+  `mbc3_rtc`; and all three `rtc3test` scripted suites.
+- Added mapper, RTC latch/halt/carry, raw-range/rollover, T-cycle, sidecar,
+  and desktop sidecar-path unit tests.
+
+### Decisions
+
+- RTC persistence uses a separate versioned `.rtc` file because timer-only
+  carts have no RAM and raw `.sav` RAM should remain interoperable.
+- The emulated RTC advances from Bus-owned DMG T-cycles while a loaded sidecar
+  applies elapsed wall time only for the period the emulator was not running.
+- No dependencies or ownership boundaries changed.
+
+### Notes
+
+- `mbc3-tester` still differs from its DMG screenshot golden by 1,280 pixels
+  after 40 frames. The result rule is framebuffer comparison, so this is not
+  evidence of a mapper/RTC fault: the focused MBC3/RTC gates now pass. It is a
+  pre-existing PPU screenshot issue and remains outside this cartridge slice.
+
 ## 0053b: Run headless desktop emulation on a dedicated stack
 
 Date: 2026-06-19
@@ -1972,7 +2023,7 @@ Add a test-only helper for constructing a minimal 32 KiB ROM image with configur
 - This helper is ready for future CPU, bus, and cartridge tests that need minimal ROM bytes at `0x0100`.
 # Milestones
 
-## 0056: Repair FIFO tile output and sprite-layer composition
+## 0055b: Repair FIFO tile output and sprite-layer composition
 
 Date: 2026-06-20
 

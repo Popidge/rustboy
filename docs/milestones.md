@@ -4,7 +4,7 @@
 
 Date: 2026-06-20
 
-Status: Partial
+Status: Complete
 
 ### Goal
 
@@ -2022,6 +2022,42 @@ Add a test-only helper for constructing a minimal 32 KiB ROM image with configur
 
 - This helper is ready for future CPU, bus, and cartridge tests that need minimal ROM bytes at `0x0100`.
 # Milestones
+
+## 0057: Improve DMG APU timing and desktop sample delivery
+
+Date: 2026-06-20
+
+Status: Partial
+
+### Goal
+
+Make key DMG APU state transitions follow the Bus T-cycle timebase, while making desktop playback preserve the core sample rate on common host devices.
+
+### Changes
+
+- Added phase-aware length-enable and trigger extra clocks for all four channels.
+- Treated envelope period zero as an eight-clock period, modelled the channel-one sweep-negate disable quirk, retained wave RAM across NR52 power-off, and permitted DMG length-register writes while powered down.
+- Restricted active channel-3 wave-RAM access to its current byte.
+- Added linear 44.1 kHz-to-host-rate interpolation in `gb-desktop`, preserving pitch on output devices such as 48 kHz hardware.
+- Added a Blargg external-RAM result-signature evaluator to `gb-romtest` for the DMG sound suite.
+
+### Tests
+
+- `cargo fmt`
+- `cargo test` (246 passed)
+- `cargo clippy --all-targets --all-features`
+- `cargo run -p gb-romtest -- run --profile audio --suite blargg --out reports/apu-0057-dmg-sound --format both --jobs 4` (all 13 DMG sound ROMs passed; CGB-only audio cases remain unsupported).
+- Added focused APU transition tests and a desktop resampler test.
+
+### Decisions
+
+- Kept APU timing and register state entirely in `gb-core`; the desktop crate only adapts core PCM to the selected host output rate.
+- Added no dependencies.
+
+### Notes
+
+- SameSuite's remaining APU ROMs target CGB-only PCM behavior and remain intentionally out of scope for this DMG milestone.
+- Future sound work can refine analog mixing and output-buffer latency/underrun observability, but the roadmap 0057 DMG state-transition gate is now covered.
 
 ## 0055b: Repair FIFO tile output and sprite-layer composition
 

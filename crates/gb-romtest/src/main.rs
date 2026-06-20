@@ -457,6 +457,7 @@ enum ResultRule {
     BreakpointRegisters,
     BreakpointScreenshot,
     SerialText,
+    BlarggSignature,
     RamSignature,
     Screenshot,
     Audio,
@@ -469,6 +470,7 @@ impl fmt::Display for ResultRule {
             Self::BreakpointRegisters => "breakpoint-registers",
             Self::BreakpointScreenshot => "breakpoint-screenshot",
             Self::SerialText => "serial-text",
+            Self::BlarggSignature => "blargg-signature",
             Self::RamSignature => "ram-signature",
             Self::Screenshot => "screenshot",
             Self::Audio => "audio",
@@ -558,7 +560,9 @@ fn classify_case(root: &Path, path: PathBuf) -> Option<RomCase> {
     let run_budget = run_budget_for(&suite, &normalized);
     let breakpoint_opcode = breakpoint_opcode_for(&suite);
 
-    let rule = if is_audio {
+    let rule = if is_blargg_dmg_sound_case(&normalized) {
+        ResultRule::BlarggSignature
+    } else if is_audio {
         ResultRule::Audio
     } else if suite == "gbmicrotest" {
         ResultRule::RamSignature
@@ -701,6 +705,10 @@ fn is_audio_case(normalized: &str) -> bool {
         || normalized.contains("/same-suite/apu/")
         || normalized.contains("_outaudio")
         || normalized.contains("/apu/")
+}
+
+fn is_blargg_dmg_sound_case(normalized: &str) -> bool {
+    normalized.starts_with("blargg/dmg_sound/")
 }
 
 fn target_requirement(normalized: &str) -> TargetRequirement {
@@ -1092,6 +1100,18 @@ fn run_emulation(
             });
         }
 
+        if case.rule == ResultRule::BlarggSignature
+            && has_blargg_signature(game_boy)
+            && matches!(game_boy.debug_read8(0xA000), 0x00 | 0x01)
+        {
+            return Ok(RunStop {
+                reason: "blargg-result-signature".to_string(),
+                frames,
+                tcycles,
+                timed_out: false,
+            });
+        }
+
         if tcycles >= case.run_budget.max_tcycles {
             return Ok(RunStop {
                 reason: "timeout".to_string(),
@@ -1211,6 +1231,13 @@ fn evaluate_case(
             game_boy.debug_read8(0xFF80),
             game_boy.debug_read8(0xFF81),
             game_boy.debug_read8(0xFF82),
+        ),
+        ResultRule::BlarggSignature => evaluate_blargg_signature(
+            game_boy.debug_read8(0xA000),
+            game_boy.debug_read8(0xA001),
+            game_boy.debug_read8(0xA002),
+            game_boy.debug_read8(0xA003),
+            stop.timed_out,
         ),
         ResultRule::Screenshot => evaluate_screenshot(case, framebuffer),
         ResultRule::Audio | ResultRule::Unsupported => (
@@ -1334,6 +1361,77 @@ fn evaluate_ram_signature(
             None,
             "The test may need more time, or emulation stopped before the ROM completed."
                 .to_string(),
+        ),
+    }
+}
+
+fn has_blargg_signature(game_boy: &GameBoy) -> bool {
+    game_boy.debug_read8(0xA001) == 0xDE
+        && game_boy.debug_read8(0xA002) == 0xB0
+        && game_boy.debug_read8(0xA003) == 0x61
+}
+
+fn evaluate_blargg_signature(
+    status: u8,
+    signature_1: u8,
+    signature_2: u8,
+    signature_3: u8,
+    timed_out: bool,
+) -> (
+    ResultStatus,
+    Option<String>,
+    Option<Vec<MemoryCheck>>,
+    Option<u64>,
+    String,
+) {
+    let checks = vec![
+        MemoryCheck {
+            address: "0xA000".to_string(),
+            expected: "0x00 (pass) or 0x01 (fail)".to_string(),
+            actual: format!("0x{status:02X}"),
+        },
+        MemoryCheck {
+            address: "0xA001..=0xA003".to_string(),
+            expected: "0xDE, 0xB0, 0x61".to_string(),
+            actual: format!("0x{signature_1:02X}, 0x{signature_2:02X}, 0x{signature_3:02X}"),
+        },
+    ];
+
+    if timed_out {
+        return (
+            ResultStatus::Timeout,
+            Some(
+                "Blargg result signature was not observed before the run budget expired"
+                    .to_string(),
+            ),
+            Some(checks),
+            None,
+            "The ROM did not publish a Blargg pass/fail result before its budget expired."
+                .to_string(),
+        );
+    }
+
+    match status {
+        0x00 => (
+            ResultStatus::Passed,
+            None,
+            Some(checks),
+            None,
+            "Blargg result signature reported success.".to_string(),
+        ),
+        0x01 => (
+            ResultStatus::Failed,
+            Some("Blargg result signature reported failure".to_string()),
+            Some(checks),
+            None,
+            "Blargg result signature reported a test failure.".to_string(),
+        ),
+        _ => (
+            ResultStatus::Timeout,
+            Some(format!("unexpected Blargg result byte 0x{status:02X}")),
+            Some(checks),
+            None,
+            "The ROM did not publish a recognised Blargg result byte.".to_string(),
         ),
     }
 }
@@ -1858,6 +1956,10 @@ mod tests {
             ResultRule::SerialText
         );
         assert_eq!(
+            case_for("blargg/dmg_sound/dmg_sound.gb").rule,
+            ResultRule::BlarggSignature
+        );
+        assert_eq!(
             case_for("same-suite/apu/channel_1/channel_1_align.gb").rule,
             ResultRule::Audio
         );
@@ -2088,6 +2190,22 @@ mod tests {
         );
         assert_eq!(evaluate_serial_text("Failed #3").0, ResultStatus::Failed);
         assert_eq!(evaluate_serial_text("").0, ResultStatus::Timeout);
+    }
+
+    #[test]
+    fn blargg_signature_evaluator_distinguishes_pass_and_fail() {
+        assert_eq!(
+            evaluate_blargg_signature(0x00, 0xDE, 0xB0, 0x61, false).0,
+            ResultStatus::Passed
+        );
+        assert_eq!(
+            evaluate_blargg_signature(0x01, 0xDE, 0xB0, 0x61, false).0,
+            ResultStatus::Failed
+        );
+        assert_eq!(
+            evaluate_blargg_signature(0x80, 0xDE, 0xB0, 0x61, true).0,
+            ResultStatus::Timeout
+        );
     }
 
     #[test]

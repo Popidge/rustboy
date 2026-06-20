@@ -1521,8 +1521,71 @@ fn draw_char(target: &mut [u32], left: usize, top: usize, character: char, color
 }
 
 struct AudioSink {
-    queue: Arc<Mutex<VecDeque<StereoSample>>>,
+    queue: Arc<Mutex<AudioQueue>>,
     _stream: cpal::Stream,
+}
+
+#[derive(Default)]
+struct AudioQueue {
+    samples: VecDeque<StereoSample>,
+    current: Option<StereoSample>,
+    next: Option<StereoSample>,
+    source_phase: u32,
+}
+
+impl AudioQueue {
+    fn push_samples(&mut self, samples: Vec<StereoSample>) {
+        self.samples.extend(samples);
+        let max_buffered_samples =
+            usize::try_from(AUDIO_SAMPLE_RATE / 2).expect("sample rate fits in usize");
+        while self.samples.len() > max_buffered_samples {
+            self.samples.pop_front();
+        }
+    }
+
+    fn next_frame(&mut self, output_sample_rate: u32) -> (f32, f32) {
+        if self.current.is_none() {
+            self.current = self.samples.pop_front();
+        }
+        if self.next.is_none() {
+            self.next = self.samples.pop_front();
+        }
+
+        let sample = match (self.current, self.next) {
+            (Some(current), Some(next)) => {
+                let fraction = phase_fraction(self.source_phase, output_sample_rate);
+                (
+                    interpolate_pcm(current.left, next.left, fraction),
+                    interpolate_pcm(current.right, next.right, fraction),
+                )
+            }
+            (Some(current), None) => (pcm_to_f32(current.left), pcm_to_f32(current.right)),
+            (None, _) => (0.0, 0.0),
+        };
+
+        self.source_phase += AUDIO_SAMPLE_RATE;
+        while self.source_phase >= output_sample_rate {
+            self.source_phase -= output_sample_rate;
+            self.current = self.next.take();
+            self.next = self.samples.pop_front();
+        }
+
+        sample
+    }
+}
+
+fn pcm_to_f32(sample: i16) -> f32 {
+    f32::from(sample) / f32::from(i16::MAX)
+}
+
+#[allow(clippy::cast_precision_loss)]
+fn phase_fraction(source_phase: u32, output_sample_rate: u32) -> f32 {
+    // Both values are host audio rates, well below the exact integer range of f32.
+    source_phase as f32 / output_sample_rate as f32
+}
+
+fn interpolate_pcm(current: i16, next: i16, fraction: f32) -> f32 {
+    pcm_to_f32(current) + (pcm_to_f32(next) - pcm_to_f32(current)) * fraction
 }
 
 impl AudioSink {
@@ -1534,7 +1597,7 @@ impl AudioSink {
         let supported_config = preferred_audio_config(&device)?;
         let sample_format = supported_config.sample_format();
         let config = supported_config.config();
-        let queue = Arc::new(Mutex::new(VecDeque::new()));
+        let queue = Arc::new(Mutex::new(AudioQueue::default()));
         let stream = match sample_format {
             cpal::SampleFormat::F32 => build_audio_stream::<f32>(&device, &config, queue.clone())?,
             cpal::SampleFormat::I16 => build_audio_stream::<i16>(&device, &config, queue.clone())?,
@@ -1558,12 +1621,7 @@ impl AudioSink {
         let Ok(mut queue) = self.queue.lock() else {
             return;
         };
-        queue.extend(samples);
-        let max_buffered_samples =
-            usize::try_from(AUDIO_SAMPLE_RATE / 2).expect("sample rate fits in usize");
-        while queue.len() > max_buffered_samples {
-            queue.pop_front();
-        }
+        queue.push_samples(samples);
     }
 }
 
@@ -1589,34 +1647,35 @@ fn preferred_audio_config(
 fn build_audio_stream<T>(
     device: &cpal::Device,
     config: &cpal::StreamConfig,
-    queue: Arc<Mutex<VecDeque<StereoSample>>>,
+    queue: Arc<Mutex<AudioQueue>>,
 ) -> Result<cpal::Stream, cpal::BuildStreamError>
 where
     T: cpal::Sample + cpal::SizedSample + cpal::FromSample<f32>,
 {
     let channels = usize::from(config.channels);
+    let output_sample_rate = config.sample_rate.0;
     device.build_output_stream(
         config,
-        move |data: &mut [T], _| fill_audio_output(data, channels, &queue),
+        move |data: &mut [T], _| fill_audio_output(data, channels, output_sample_rate, &queue),
         |error| eprintln!("audio stream error: {error}"),
         None,
     )
 }
 
-fn fill_audio_output<T>(data: &mut [T], channels: usize, queue: &Arc<Mutex<VecDeque<StereoSample>>>)
-where
+fn fill_audio_output<T>(
+    data: &mut [T],
+    channels: usize,
+    output_sample_rate: u32,
+    queue: &Arc<Mutex<AudioQueue>>,
+) where
     T: cpal::Sample + cpal::FromSample<f32>,
 {
     let mut guard = queue.lock().ok();
 
     for frame in data.chunks_mut(channels) {
-        let sample = guard.as_mut().and_then(|queue| queue.pop_front());
-        let (left, right) = sample.map_or((0.0, 0.0), |sample| {
-            (
-                f32::from(sample.left) / f32::from(i16::MAX),
-                f32::from(sample.right) / f32::from(i16::MAX),
-            )
-        });
+        let (left, right) = guard
+            .as_mut()
+            .map_or((0.0, 0.0), |queue| queue.next_frame(output_sample_rate));
 
         if let Some(channel) = frame.get_mut(0) {
             *channel = T::from_sample(left);
@@ -2038,5 +2097,30 @@ mod tests {
         assert_eq!(shade_digit(shade_index(0xFFAA_AAAA)), '1');
         assert_eq!(shade_digit(shade_index(0xFF55_5555)), '2');
         assert_eq!(shade_digit(shade_index(0xFF00_0000)), '3');
+    }
+
+    #[test]
+    fn audio_queue_resamples_the_core_rate_to_host_rate_without_dropping_the_endpoints() {
+        let mut queue = AudioQueue::default();
+        queue.push_samples(vec![
+            StereoSample { left: 0, right: 0 },
+            StereoSample {
+                left: i16::MAX,
+                right: i16::MAX,
+            },
+        ]);
+
+        let first = queue.next_frame(48_000);
+        let second = queue.next_frame(48_000);
+
+        assert_eq!(
+            first,
+            (0.0, 0.0),
+            "resampling starts at the first source sample"
+        );
+        assert!(
+            second.0 > 0.0 && second.1 > 0.0,
+            "a 48 kHz host callback should interpolate successive 44.1 kHz core samples"
+        );
     }
 }
